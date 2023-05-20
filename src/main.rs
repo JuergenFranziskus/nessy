@@ -4,7 +4,6 @@ use nessy::{
     nes::Nes,
     rom::Rom,
 };
-use std::time::Duration;
 
 fn main() {
     let rom_src = std::fs::read("roms/ZeldaScreen.nes").unwrap();
@@ -30,7 +29,6 @@ fn main() {
             );
             print_instruction = synced;
         }
-        //std::thread::sleep(Duration::from_secs_f32(0.001));
     }
 }
 

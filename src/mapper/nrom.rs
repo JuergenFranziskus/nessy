@@ -17,6 +17,7 @@ pub struct NRom {
 impl Mapper for NRom {
     fn cycle(&mut self, pins: InPins) {
         self.service_cpu(pins);
+        self.service_ppu(pins);
 
         self.cpu_service_pending = pins.cpu_cycle;
         self.ppu_service_pending = pins.ppu_cycle;
@@ -79,6 +80,6 @@ impl NRom {
             Mirroring::Horizontal => a11,
             Mirroring::Vertical => a10,
         };
-        self.out.ciram_ce = (0x2000..0x4000).contains(&address);
+        self.out.ciram_ce = (0x2000..0x3EFF).contains(&address);
     }
 }

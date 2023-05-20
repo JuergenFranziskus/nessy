@@ -7,7 +7,7 @@ use nessy::{
 use std::time::Duration;
 
 fn main() {
-    let rom_src = std::fs::read("roms/Mario1NTSC.nes").unwrap();
+    let rom_src = std::fs::read("roms/ZeldaScreen.nes").unwrap();
     let rom = Rom::parse(&rom_src);
     assert_eq!(rom.header.mapper, 0);
     let mapper = NRom::new(rom.prg_rom, rom.chr_rom, rom.header.mirroring);
@@ -17,7 +17,7 @@ fn main() {
     for cycle in 0.. {
         nes.master_cycle();
 
-        let debug = nes.cpu_cycles() == 11;
+        let debug = nes.cpu_cycles() == 0;
         let synced = nes.cpu().out().sync;
         if debug {
             nes.force_update_pins();
@@ -30,7 +30,7 @@ fn main() {
             );
             print_instruction = synced;
         }
-        std::thread::sleep(Duration::from_secs_f32(0.01));
+        //std::thread::sleep(Duration::from_secs_f32(0.001));
     }
 }
 

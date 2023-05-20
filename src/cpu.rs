@@ -2,7 +2,7 @@ use self::instruction::{decode, AddressMode, Opcode};
 
 mod instruction;
 
-pub struct CPU {
+pub struct Cpu {
     a: u8,
     x: u8,
     y: u8,
@@ -10,10 +10,14 @@ pub struct CPU {
     pc: u16,
     flags: Flags,
 
+    last_nmi: bool,
+    nmi_pending: bool,
+    irq_pending: bool,
+
     state: State,
     out: OutPins,
 }
-impl CPU {
+impl Cpu {
     pub fn new() -> (Self, InPins) {
         let pins = InPins::init();
         let cpu = Self {
@@ -22,6 +26,11 @@ impl CPU {
             y: 0,
             sp: 0,
             pc: 0,
+
+            last_nmi: false,
+            nmi_pending: false,
+            irq_pending: false,
+
             flags: Flags::init(),
             state: State::init(),
             out: OutPins::init(),
@@ -39,9 +48,19 @@ impl CPU {
         }
 
         self.exec(pins);
+        self.poll_interrupts(pins);
         self.out
     }
-    pub fn out_pins(&self) -> OutPins {
+    fn poll_interrupts(&mut self, pins: InPins) {
+        if !self.last_nmi && pins.nmi {
+            self.nmi_pending = true;
+        }
+        self.irq_pending = pins.irq;
+
+        self.last_nmi = pins.nmi;
+    }
+
+    pub fn out(&self) -> OutPins {
         self.out
     }
 
@@ -928,10 +947,17 @@ impl CPU {
         self.read(address);
     }
     fn fetch(&mut self) {
-        // TODO: Interrupt logic
-
-        self.read_pc_byte();
-        self.out.sync = true;
+        if self.nmi_pending {
+            self.nmi_pending = false;
+            self.sync_state(Opcode::BRK, AddressMode::Implied);
+            self.state.break_mode = BreakMode::nmi();
+        } else if self.irq_pending {
+            self.sync_state(Opcode::BRK, AddressMode::Implied);
+            self.state.break_mode = BreakMode::irq();
+        } else {
+            self.read_pc_byte();
+            self.out.sync = true;
+        }
     }
     fn read_pc_byte(&mut self) {
         self.read(self.pc);
@@ -1071,7 +1097,7 @@ impl BreakMode {
             increment_pc: true,
         }
     }
-    fn _irq() -> Self {
+    fn irq() -> Self {
         Self {
             vector: 0xFFFE,
             b_flag: false,
@@ -1080,7 +1106,7 @@ impl BreakMode {
             increment_pc: false,
         }
     }
-    fn _nmi() -> Self {
+    fn nmi() -> Self {
         Self {
             vector: 0xFFFA,
             b_flag: false,
@@ -1135,6 +1161,7 @@ pub struct OutPins {
     pub address: u16,
     pub read: bool,
     pub sync: bool,
+    pub halted: bool,
 }
 impl OutPins {
     pub fn init() -> OutPins {
@@ -1143,6 +1170,7 @@ impl OutPins {
             address: 0,
             read: true,
             sync: false,
+            halted: false,
         }
     }
 }

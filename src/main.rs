@@ -1,46 +1,48 @@
-use ihex::{Reader, Record};
-use nessy::cpu::{InPins, OutPins, CPU};
-
-const REPORT_OUT: usize = 0xf001;
-const REPORT_IN: usize = 0xf004;
+use nessy::{
+    cpu::{Cpu, InPins as CPins, OutPins},
+    mapper::nrom::NRom,
+    nes::Nes,
+    rom::Rom,
+};
+use std::time::Duration;
 
 fn main() {
-    let mut memory = load_program();
+    let rom_src = std::fs::read("roms/Mario1NTSC.nes").unwrap();
+    let rom = Rom::parse(&rom_src);
+    assert_eq!(rom.header.mapper, 0);
+    let mapper = NRom::new(rom.prg_rom, rom.chr_rom, rom.header.mirroring);
+    let mut nes = Nes::new(mapper);
 
-    let (mut cpu, mut pins) = CPU::new();
+    let mut print_instruction = true;
+    for cycle in 0.. {
+        nes.master_cycle();
 
-    cpu.force_pc(0x400);
-    cpu.force_fetch();
-    pins.data = memory[0x400];
-
-    for _ in 0.. {
-        iteration(&mut pins, &mut cpu, &mut memory);
+        let debug = nes.cpu_cycles() == 11;
+        let synced = nes.cpu().out().sync;
+        if debug {
+            nes.force_update_pins();
+            print_cycle_debug(
+                cycle,
+                nes.cpu_pins(),
+                nes.cpu().out(),
+                nes.cpu(),
+                print_instruction,
+            );
+            print_instruction = synced;
+        }
+        std::thread::sleep(Duration::from_secs_f32(0.01));
     }
-}
-
-fn iteration(pins: &mut InPins, cpu: &mut CPU, memory: &mut [u8]) -> OutPins {
-    let out = cpu.cycle(*pins);
-    let address = out.address as usize;
-
-    if !out.read && address == REPORT_OUT {
-        print!("{}", out.data as char);
-    } else if !out.read {
-        memory[address] = out.data;
-    } else if address == REPORT_IN {
-        pins.data = 'c' as u8;
-    } else {
-        pins.data = memory[address];
-    }
-
-    out
 }
 
 #[allow(dead_code)]
-fn print_cycle_debug(cycle: isize, pins: InPins, out: OutPins, cpu: &CPU, print_instruction: bool) {
-    let data = pins.data;
+fn print_cycle_debug(cycle: isize, pins: CPins, out: OutPins, cpu: &Cpu, print_instruction: bool) {
+    let data = if out.read { pins.data } else { out.data };
     let address = out.address;
     let rw = if out.read { "     " } else { "WRITE" };
     let sync = if out.sync { "SYNC" } else { "    " };
+    let nmi = if pins.nmi { "NMI" } else { "   " };
+    let irq = if pins.irq { "IRQ" } else { "   " };
+    let reset = if pins.reset { "RST" } else { "   " };
 
     let a = cpu.a();
     let x = cpu.x();
@@ -63,33 +65,9 @@ fn print_cycle_debug(cycle: isize, pins: InPins, out: OutPins, cpu: &CPU, print_
     };
 
     println!(
-        "{cycle:0>4}: {rw} {sync} {address:0>4x} = {data:>2x}; \
+        "{cycle:0>4}: {nmi} {irq} {reset} {rw} {sync} {address:0>4x} = {data:>2x}; \
         {instr:<14}     \
         A = {a:>2x}, X = {x:>2x}, Y = {y:>2x}, SP = {sp:>2x}, PC = {pc:>4x};  \
         {n}{v}  {d}{i}{z}{c}"
     );
-}
-
-fn load_program() -> [u8; 65536] {
-    let src = std::fs::read_to_string("test_roms/klaus2m_functional.hex").unwrap();
-    let mut memory = [0; 65536];
-
-    let reader = Reader::new(&src);
-    for record in reader {
-        let record = record.unwrap();
-
-        match record {
-            Record::Data { offset, value } => {
-                let start = offset as usize;
-                let len = value.len();
-                let end = start + len;
-                let slice = &mut memory[start..end];
-                slice.copy_from_slice(&value);
-            }
-            Record::EndOfFile => break,
-            _ => unreachable!(),
-        }
-    }
-
-    memory
 }

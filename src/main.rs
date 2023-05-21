@@ -1,8 +1,10 @@
 use nessy::{
-    cpu::{Cpu, InPins as CPins, OutPins},
+    cpu::Cpu,
     mapper::nrom::NRom,
     nes::Nes,
     rom::Rom,
+    processor::InPins as RPins,
+    processor::OutPins,
 };
 
 fn main() {
@@ -22,8 +24,8 @@ fn main() {
             nes.force_update_pins();
             print_cycle_debug(
                 cycle,
-                nes.cpu_pins(),
-                nes.cpu().out(),
+                nes.processor_pins(),
+                nes.processor().out(),
                 nes.cpu(),
                 print_instruction,
             );
@@ -33,7 +35,7 @@ fn main() {
 }
 
 #[allow(dead_code)]
-fn print_cycle_debug(cycle: isize, pins: CPins, out: OutPins, cpu: &Cpu, print_instruction: bool) {
+fn print_cycle_debug(cycle: isize, pins: RPins, out: OutPins, cpu: &Cpu, print_instruction: bool) {
     let data = if out.read { pins.data } else { out.data };
     let address = out.address;
     let rw = if out.read { "     " } else { "WRITE" };

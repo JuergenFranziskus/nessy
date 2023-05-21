@@ -113,8 +113,6 @@ impl Ppu {
                 self.background_pattern_table = if data & 16 != 0 { 0x1000 } else { 0 };
                 self.wide_sprites = data & 32 != 0;
                 self.generate_nmi = data & 128 != 0;
-
-                eprintln!("NMI enabled: {}", self.generate_nmi);
             }
             1 => {
                 if pins.cpu_read {

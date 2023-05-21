@@ -1,15 +1,17 @@
 use crate::ppu::{InPins as PPins, Ppu};
-use crate::{cpu::Cpu, cpu::InPins as CPins, mapper::InPins as MPins, mapper::Mapper};
+use crate::processor::Processor;
+use crate::{cpu::Cpu, mapper::InPins as MPins, mapper::Mapper};
+use crate::processor::InPins as RPins;
 
 pub struct Nes<M> {
-    cpu: Cpu,
+    processor: Processor,
     ppu: Ppu,
     mapper: M,
 
-    cpu_cycles: usize,
+    processor_cycles: usize,
     ppu_cycles: usize,
 
-    cpu_pins: CPins,
+    processor_pins: RPins,
     ppu_pins: PPins,
     mapper_pins: MPins,
 
@@ -21,19 +23,17 @@ pub struct Nes<M> {
 }
 impl<M> Nes<M> {
     pub fn new(mapper: M) -> Self {
-        let (cpu, cpu_pins) = Cpu::new();
-        let mapper_pins = MPins::init();
         Self {
-            cpu,
+            processor: Processor::new(),
             ppu: Ppu::new(),
             mapper,
 
-            cpu_cycles: 0,
+            processor_cycles: 0,
             ppu_cycles: 0,
 
-            cpu_pins,
+            processor_pins: RPins::init(),
             ppu_pins: PPins::init(),
-            mapper_pins,
+            mapper_pins: MPins::init(),
 
             ppu_address_latch: 0,
 
@@ -44,13 +44,16 @@ impl<M> Nes<M> {
     }
 
     pub fn cpu_cycles(&self) -> usize {
-        self.cpu_cycles
+        self.processor_cycles
     }
     pub fn cpu(&self) -> &Cpu {
-        &self.cpu
+        self.processor.cpu()
     }
-    pub fn cpu_pins(&self) -> CPins {
-        self.cpu_pins
+    pub fn processor_pins(&self) -> RPins {
+        self.processor_pins
+    }
+    pub fn processor(&self) -> &Processor {
+        &self.processor
     }
 }
 impl<M: Mapper> Nes<M> {
@@ -71,12 +74,12 @@ impl<M: Mapper> Nes<M> {
     }
     fn cycle_cpu(&mut self) {
         self.update_cpu_pins();
-        self.cpu.cycle(self.cpu_pins);
+        self.processor.cycle(self.processor_pins);
     }
     fn update_cpu_pins(&mut self) {
-        self.cpu_pins.data = self.busses.cpu_data;
-        self.cpu_pins.irq = self.mapper.out().irq;
-        self.cpu_pins.nmi = self.ppu.out().nmi;
+        self.processor_pins.data = self.busses.processor_data;
+        self.processor_pins.irq = self.mapper.out().irq;
+        self.processor_pins.nmi = self.ppu.out().nmi;
     }
     fn cycle_ppu(&mut self) {
         self.update_ppu_pins();
@@ -85,9 +88,9 @@ impl<M: Mapper> Nes<M> {
     }
     fn update_ppu_pins(&mut self) {
         self.ppu_pins.cpu_cycle = self.cpu_should_cycle();
-        self.ppu_pins.cpu_read = self.cpu.out().read;
-        self.ppu_pins.cpu_address = self.cpu.out().address;
-        self.ppu_pins.cpu_data = self.busses.cpu_data;
+        self.ppu_pins.cpu_read = self.processor.out().read;
+        self.ppu_pins.cpu_address = self.processor.out().address;
+        self.ppu_pins.cpu_data = self.busses.processor_data;
 
         self.ppu_pins.mem_data = self.busses.ppu_data;
     }
@@ -102,11 +105,11 @@ impl<M: Mapper> Nes<M> {
         self.mapper.cycle(self.mapper_pins);
     }
     fn update_mapper_pins(&mut self) {
-        let cpu_out = self.cpu.out();
+        let cpu_out = self.processor.out();
         let ppu_out = self.ppu.out();
 
         self.mapper_pins.cpu_address = cpu_out.address;
-        self.mapper_pins.cpu_data = self.busses.cpu_data;
+        self.mapper_pins.cpu_data = self.busses.processor_data;
         self.mapper_pins.cpu_read = cpu_out.read;
         self.mapper_pins.cpu_cycle = self.cpu_should_cycle();
 
@@ -151,52 +154,52 @@ impl<M: Mapper> Nes<M> {
         }
     }
     fn update_cpu_data_bus(&mut self) {
-        let cpu_out = self.cpu.out();
+        let cpu_out = self.processor.out();
         let ppu_out = self.ppu.out();
         let map_out = self.mapper.out();
 
-        self.busses.cpu_data = 0;
+        self.busses.processor_data = 0;
         if !cpu_out.read {
-            self.busses.cpu_data |= cpu_out.data;
+            self.busses.processor_data |= cpu_out.data;
         }
         if let Some(data) = map_out.cpu_data {
-            self.busses.cpu_data |= data;
+            self.busses.processor_data |= data;
         }
         if let Some(data) = ppu_out.cpu_data {
-            self.busses.cpu_data |= data;
+            self.busses.processor_data |= data;
         }
         if ppu_out.cross_data_busses {
             // Required for addressing ppu memory thru $PPUDATA
-            self.busses.cpu_data |= self.busses.ppu_data;
+            self.busses.processor_data |= self.busses.ppu_data;
         }
 
         self.update_cpu_memory();
     }
     fn update_cpu_memory(&mut self) {
-        let cpu_out = self.cpu.out();
+        let cpu_out = self.processor.out();
 
         let address = cpu_out.address as usize;
         if address < 0x2000 {
             let address = address % 0x800;
 
             if cpu_out.read {
-                self.busses.cpu_data |= self.memory[address];
+                self.busses.processor_data |= self.memory[address];
             } else {
-                self.memory[address] = self.busses.cpu_data;
+                self.memory[address] = self.busses.processor_data;
             }
         }
     }
 
     fn tick_counters(&mut self) {
-        self.cpu_cycles += 1;
-        self.cpu_cycles %= 12;
+        self.processor_cycles += 1;
+        self.processor_cycles %= 12;
 
         self.ppu_cycles += 1;
         self.ppu_cycles %= 4;
     }
 
     fn cpu_should_cycle(&self) -> bool {
-        self.cpu_cycles == 0
+        self.processor_cycles == 0
     }
     fn ppu_should_cycle(&self) -> bool {
         self.ppu_cycles == 0
@@ -219,13 +222,13 @@ impl<M: Mapper> Nes<M> {
 }
 
 struct Busses {
-    cpu_data: u8,
+    processor_data: u8,
     ppu_data: u8,
 }
 impl Busses {
     fn init() -> Self {
         Self {
-            cpu_data: 0,
+            processor_data: 0,
             ppu_data: 0,
         }
     }

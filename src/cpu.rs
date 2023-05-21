@@ -2,6 +2,7 @@ use self::instruction::{decode, AddressMode, Opcode};
 
 mod instruction;
 
+#[derive(Copy, Clone, Debug)]
 pub struct Cpu {
     a: u8,
     x: u8,
@@ -39,7 +40,13 @@ impl Cpu {
         (cpu, pins)
     }
     pub fn cycle(&mut self, pins: InPins) -> OutPins {
+        let mut backup = None;
+        if !pins.ready {
+            backup = Some(*self)
+        }
+
         self.out.read = true;
+        self.out.halted = false;
         if self.out.sync {
             // If you're reading this later, reminder:
             // The interrupt logic goes in 'fetch', not here.
@@ -49,6 +56,12 @@ impl Cpu {
 
         self.exec(pins);
         self.poll_interrupts(pins);
+
+        if !pins.ready && self.out.read {
+            *self = backup.unwrap();
+            self.out.halted = true;
+        }
+
         self.out
     }
     fn poll_interrupts(&mut self, pins: InPins) {
@@ -1126,6 +1139,7 @@ impl BreakMode {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
 struct State {
     break_mode: BreakMode,
     /// The number of cycles that the relevant addressing mode has been executing for.

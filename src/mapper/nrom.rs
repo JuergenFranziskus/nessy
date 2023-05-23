@@ -8,19 +8,13 @@ pub struct NRom {
     chr_rom: Vec<u8>,
     mirror: Mirroring,
 
-    cpu_service_pending: bool,
-    ppu_service_pending: bool,
-
     out: OutPins,
 }
 
 impl Mapper for NRom {
-    fn cycle(&mut self, pins: InPins) {
+    fn master_cycle(&mut self, pins: InPins) {
         self.service_cpu(pins);
         self.service_ppu(pins);
-
-        self.cpu_service_pending = pins.cpu_cycle;
-        self.ppu_service_pending = pins.ppu_cycle;
     }
 
     fn out(&self) -> OutPins {
@@ -34,18 +28,11 @@ impl NRom {
             chr_rom,
             mirror,
 
-            cpu_service_pending: false,
-            ppu_service_pending: false,
-
             out: OutPins::init(),
         }
     }
 
     fn service_cpu(&mut self, pins: InPins) {
-        if !self.cpu_service_pending {
-            return;
-        }
-        self.cpu_service_pending = false;
         self.out.cpu_data = None;
 
         let address = pins.cpu_address as usize;
@@ -62,10 +49,6 @@ impl NRom {
         }
     }
     fn service_ppu(&mut self, pins: InPins) {
-        if !self.ppu_service_pending {
-            return;
-        }
-        self.ppu_service_pending = false;
         self.out.ppu_data = None;
 
         let address = pins.ppu_address as usize;

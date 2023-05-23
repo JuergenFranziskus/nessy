@@ -1,97 +1,98 @@
-const PIXELS_PER_LINE: u16 = 341;
-const LINES_PER_FRAME: u16 = 262;
-const NMI_START: [u16; 2] = [1, 241];
-const NMI_END: [u16; 2] = [1, 261];
+use self::renderer::{color_to_rgb, Renderer};
+
+const CYCLES_PER_LINE: u32 = 341;
+const LINES_PER_FRAME: u32 = 262;
+const CYCLES_PER_FRAME: u32 = CYCLES_PER_LINE * LINES_PER_FRAME;
+const NMI_START: u32 = 82182;
+const NMI_END: u32 = 89002;
+
+pub mod renderer;
 
 #[allow(dead_code)]
 pub struct Ppu {
-    base_nametable_address: u16,
-    vram_address_increment: u16,
-    sprite_pattern_table: u16,
-    background_pattern_table: u16,
-    wide_sprites: bool,
-    generate_nmi: bool,
-    greyscale: bool,
-    show_leftmost_background: bool,
-    show_leftmost_sprites: bool,
-    show_background: bool,
-    show_sprites: bool,
-    emphasize_red: bool,
-    emphasize_green: bool,
-    emphasize_blue: bool,
+    master_cycle: u8,
+    last_m2: bool,
 
-    sprite_overflow: bool,
-    sprite_zero_hit: bool,
-    vblank: bool,
+    control: Control,
+    mask: Mask,
+    status: Status,
 
     oam_memory: [u8; 256],
     oam_address: u8,
-    scroll: [u8; 2],
+    scroll: Scroll,
     address: u16,
 
-    pixel: [u16; 2],
+    render_cycle: u32,
     odd_frame: bool,
 
-    cpu_service_pending: bool,
     scheduled_mem_op: Option<MemOp>,
 
+    fetch: Fetch,
+    graphics: Graphics,
+    framebuffer: [[u8; 3]; 256 * 240],
     out: OutPins,
 }
 impl Ppu {
     pub fn new() -> Self {
         Self {
-            base_nametable_address: 0x2000,
-            vram_address_increment: 1,
-            sprite_pattern_table: 0,
-            background_pattern_table: 0,
-            wide_sprites: false,
-            generate_nmi: false,
+            master_cycle: 0,
+            last_m2: false,
 
-            greyscale: false,
-            show_leftmost_background: true,
-            show_leftmost_sprites: true,
-            show_background: false,
-            show_sprites: false,
-            emphasize_red: false,
-            emphasize_green: false,
-            emphasize_blue: false,
-
-            sprite_overflow: false,
-            sprite_zero_hit: false,
-            vblank: false,
+            control: Control::init(),
+            mask: Mask::init(),
+            status: Status::init(),
 
             oam_memory: [0; 256],
             oam_address: 0,
-            scroll: [0; 2],
+            scroll: Scroll::init(),
             address: 0,
 
-            pixel: [0; 2],
+            render_cycle: 0,
             odd_frame: false,
 
-            cpu_service_pending: false,
             scheduled_mem_op: None,
 
+            fetch: Fetch::init(),
+            graphics: Graphics::init(),
+            framebuffer: [[0; 3]; 256 * 240],
             out: OutPins::init(),
         }
     }
 
-    pub fn cycle(&mut self, pins: InPins) {
+    pub fn master_cycle(&mut self, pins: InPins) {
+        if self.should_cycle_ppu() {
+            self.ppu_cycle(pins);
+        }
+
+        self.service_cpu(pins);
+        self.tick_counter();
+        self.last_m2 = pins.cpu_m2;
+    }
+    fn should_cycle_ppu(&self) -> bool {
+        self.master_cycle == 0
+    }
+    fn tick_counter(&mut self) {
+        self.master_cycle += 1;
+        self.master_cycle %= 4;
+    }
+
+    fn ppu_cycle(&mut self, pins: InPins) {
         self.out.ale = false;
         self.out.read_enable = false;
         self.out.write_enable = false;
 
         self.decide_nmi();
         self.perform_mem_op();
-        self.service_cpu(pins);
+        self.fetch_graphics(pins);
+        self.render();
         self.tick_pixel();
-
-        self.cpu_service_pending |= pins.cpu_cycle;
     }
     fn service_cpu(&mut self, pins: InPins) {
-        if !self.cpu_service_pending {
+        let m2_edge = self.last_m2 != pins.cpu_m2;
+        if !m2_edge || !pins.cpu_m2 {
             return;
         }
-        self.cpu_service_pending = false;
+
         self.out.cross_data_busses = false;
         self.out.cpu_data = None;
         let in_range = (0x2000..0x4000).contains(&pins.cpu_address);
@@ -105,38 +106,23 @@ impl Ppu {
                 if pins.cpu_read {
                     return;
                 }
-                let data = pins.cpu_data;
 
-                self.base_nametable_address = 0x2000 + (data as u16 & 0b11) * 0x400;
-                self.vram_address_increment = if data & 4 != 0 { 32 } else { 1 };
-                self.sprite_pattern_table = if data & 8 != 0 { 0x1000 } else { 0 };
-                self.background_pattern_table = if data & 16 != 0 { 0x1000 } else { 0 };
-                self.wide_sprites = data & 32 != 0;
-                self.generate_nmi = data & 128 != 0;
+                self.control.reconfig(pins.cpu_data);
+                let high_x = pins.cpu_data & 1 != 0;
+                let high_y = pins.cpu_data & 2 != 0;
+                self.scroll.write_high(high_x, high_y);
             }
             1 => {
                 if pins.cpu_read {
                     return;
                 }
-                let data = pins.cpu_data;
-                self.greyscale = data & 1 != 0;
-                self.show_leftmost_background = data & 2 != 0;
-                self.show_leftmost_sprites = data & 4 != 0;
-                self.show_background = data & 8 != 0;
-                self.show_sprites = data & 16 != 0;
-                self.emphasize_red = data & 32 != 0;
-                self.emphasize_green = data & 64 != 0;
-                self.emphasize_blue = data & 128 != 0;
+
+                self.mask.reconfig(pins.cpu_data);
             }
             2 => {
-                let overflow = (self.sprite_overflow as u8) << 5;
-                let hit = (self.sprite_zero_hit as u8) << 6;
-                let blank = (self.vblank as u8) << 7;
-
-                self.out.cpu_data = Some(overflow | hit | blank);
-                self.vblank = false;
+                self.out.cpu_data = Some(self.status.get_read());
                 self.address = 0;
-                self.scroll = [0; 2];
+                self.scroll = Scroll::init();
             }
             3 => {
                 if pins.cpu_read {
@@ -158,8 +144,7 @@ impl Ppu {
                     return;
                 }
 
-                self.scroll[0] = self.scroll[1];
-                self.scroll[1] = pins.cpu_data;
+                self.scroll.write_low(pins.cpu_data);
             }
             6 => {
                 if pins.cpu_read {
@@ -178,7 +163,7 @@ impl Ppu {
                     self.schedule_write(self.address, pins.cpu_data);
                 }
 
-                self.address += self.vram_address_increment;
+                self.address += self.control.vram_address_increment;
                 self.address %= 0x4000;
             }
             _ => unreachable!("#{address} is not a valid ppu register or is not yet implemented"),
@@ -193,32 +178,26 @@ impl Ppu {
         self.out.write_enable = op.data.is_some();
     }
     fn decide_nmi(&mut self) {
-        if self.pixel == NMI_START {
-            self.vblank = true;
-        } else if self.pixel == NMI_END {
-            self.vblank = false;
+        if self.render_cycle == NMI_START {
+            self.status.vblank = true;
+        } else if self.render_cycle == NMI_END {
+            self.status.vblank = false;
         }
 
-        self.out.nmi = self.generate_nmi && self.vblank;
+        self.out.nmi = self.control.generate_nmi && self.status.vblank;
     }
     fn tick_pixel(&mut self) {
-        let max_x = if self.odd_frame {
-            PIXELS_PER_LINE - 2
+        let final_cycle = if self.odd_frame {
+            CYCLES_PER_FRAME - 1
         } else {
-            PIXELS_PER_LINE - 1
+            CYCLES_PER_FRAME - 2
         };
-        let max_y = LINES_PER_FRAME - 1;
-        let final_pixel = [max_x, max_y];
 
-        if self.pixel == final_pixel {
-            self.pixel = [0, 0];
+        if self.render_cycle == final_cycle {
+            self.render_cycle = 0;
             self.odd_frame = !self.odd_frame;
         } else {
-            self.pixel[0] += 1;
-            if self.pixel[0] == PIXELS_PER_LINE {
-                self.pixel[0] = 0;
-                self.pixel[1] += 1;
-            }
+            self.render_cycle += 1;
         }
     }
 
@@ -234,8 +213,129 @@ impl Ppu {
         self.schedule_mem_op(address, Some(data));
     }
 
+    fn fetch_graphics(&mut self, pins: InPins) {
+        if self.mask.render_disabled() {
+            return;
+        }
+
+        let scanline = self.render_cycle / CYCLES_PER_LINE;
+        let line_cycle = self.render_cycle % CYCLES_PER_LINE;
+
+        if scanline == LINES_PER_FRAME - 1 && line_cycle == 0 {
+            self.fetch.start_fetch();
+        }
+
+        if !self.fetch.fetching {
+            return;
+        }
+
+        match self.fetch.awaiting {
+            Awaiting::None => (),
+            Awaiting::Name => {
+                self.graphics.nametable[self.fetch.nametable as usize] = pins.mem_data;
+                self.fetch.nametable += 1;
+            }
+            Awaiting::Pattern => {
+                self.graphics.pattern_table[self.fetch.pattern_table as usize] = pins.mem_data;
+                self.fetch.pattern_table += 1;
+            }
+            Awaiting::Palette => {
+                let palette_i = self.fetch.palette as usize / 3;
+                let color_i = self.fetch.palette as usize % 3;
+                self.graphics.palette[palette_i][color_i] = pins.mem_data;
+                self.fetch.palette += 1;
+            }
+            Awaiting::Background => {
+                self.graphics.background = pins.mem_data;
+                self.fetch.background = true;
+            }
+        }
+        self.fetch.awaiting = Awaiting::None;
+
+        match line_cycle {
+            0 => (),
+            1..=256 => {
+                let name_done = self.fetch.nametable >= 4096;
+                let pattern_done = self.fetch.pattern_table >= 8192;
+                let background_done = self.fetch.background;
+                let palette_done = self.fetch.palette >= 24;
+
+                if pattern_done && name_done && background_done && palette_done {
+                    self.fetch.fetching = false;
+                    return;
+                }
+
+                let turn = match self.fetch.cycle % 8 {
+                    0 | 1 if !name_done => Awaiting::Name,
+                    0 | 1 => Awaiting::Pattern,
+                    2 | 3 if !pattern_done => Awaiting::Pattern,
+                    2 | 3 => unreachable!(),
+                    4 | 5 if !background_done => Awaiting::Background,
+                    4 | 5 if !name_done => Awaiting::Name,
+                    4 | 5 => Awaiting::Pattern,
+                    6 | 7 if !palette_done => Awaiting::Palette,
+                    6 | 7 => Awaiting::Pattern,
+                    _ => unreachable!(),
+                };
+                let step = self.fetch.cycle % 2;
+
+                let address = match turn {
+                    Awaiting::None => {
+                        dbg!(name_done, pattern_done, background_done, palette_done);
+                        panic!()
+                    }
+                    Awaiting::Name => self.fetch.nametable + 0x2000,
+                    Awaiting::Pattern => self.fetch.pattern_table,
+                    Awaiting::Background => 0x3F00,
+                    Awaiting::Palette => {
+                        let palette = self.fetch.palette / 3;
+                        let color = self.fetch.palette % 3;
+                        let offset = palette * 4 + color;
+                        0x3F01 + offset
+                    }
+                };
+
+                match step {
+                    0 => self.schedule_read(address),
+                    1 => self.fetch.awaiting = turn,
+                    _ => unreachable!(),
+                }
+
+                self.fetch.cycle += 1;
+            }
+            337 => self.schedule_read(0x2000),
+            338 => (),
+            339 => self.schedule_read(0x2000),
+            _ => (),
+        }
+    }
+    fn render(&mut self) {
+        if self.render_cycle != NMI_START {
+            return;
+        }
+        if self.mask.render_disabled() {
+            self.framebuffer = [color_to_rgb(self.graphics.background); 256 * 240];
+            return;
+        }
+
+        let renderer = Renderer::new(
+            &mut self.framebuffer,
+            &self.graphics.pattern_table,
+            &self.graphics.nametable,
+            self.control.background_pattern_table,
+            self.graphics.background,
+            self.graphics.palette,
+            self.scroll,
+        );
+        renderer.render();
+    }
+
     pub fn out(&self) -> OutPins {
         self.out
+    }
+
+    pub fn framebuffer(&self) -> &[[u8; 3]; 256 * 240] {
+        &self.framebuffer
     }
 }
 
@@ -246,7 +346,7 @@ struct MemOp {
 
 #[derive(Copy, Clone, Debug)]
 pub struct InPins {
-    pub cpu_cycle: bool,
+    pub cpu_m2: bool,
     pub cpu_read: bool,
     pub cpu_address: u16,
     pub cpu_data: u8,
@@ -255,7 +355,7 @@ pub struct InPins {
 impl InPins {
     pub fn init() -> Self {
         Self {
-            cpu_cycle: false,
+            cpu_m2: false,
             cpu_read: true,
             cpu_address: 0,
             cpu_data: 0,
@@ -285,6 +385,177 @@ impl OutPins {
             read_enable: false,
             write_enable: false,
             cross_data_busses: false,
+        }
+    }
+}
+
+struct Control {
+    vram_address_increment: u16,
+    sprite_pattern_table: bool,
+    background_pattern_table: bool,
+    wide_sprites: bool,
+    generate_nmi: bool,
+}
+impl Control {
+    fn init() -> Self {
+        Self {
+            vram_address_increment: 1,
+            sprite_pattern_table: false,
+            background_pattern_table: false,
+            wide_sprites: false,
+            generate_nmi: false,
+        }
+    }
+
+    fn reconfig(&mut self, data: u8) {
+        self.vram_address_increment = if data & 4 != 0 { 32 } else { 1 };
+        self.sprite_pattern_table = data & 8 != 0;
+        self.background_pattern_table = data & 16 != 0;
+        self.wide_sprites = data & 32 != 0;
+        self.generate_nmi = data & 128 != 0;
+    }
+}
+
+struct Mask {
+    greyscale: bool,
+    show_leftmost_background: bool,
+    show_leftmost_sprites: bool,
+    show_background: bool,
+    show_sprites: bool,
+    emphasize_red: bool,
+    emphasize_green: bool,
+    emphasize_blue: bool,
+}
+impl Mask {
+    fn init() -> Self {
+        Self {
+            greyscale: false,
+            show_leftmost_background: true,
+            show_leftmost_sprites: true,
+            show_background: false,
+            show_sprites: false,
+            emphasize_red: false,
+            emphasize_green: false,
+            emphasize_blue: false,
+        }
+    }
+
+    fn reconfig(&mut self, data: u8) {
+        self.greyscale = data & 1 != 0;
+        self.show_leftmost_background = data & 2 != 0;
+        self.show_leftmost_sprites = data & 4 != 0;
+        self.show_background = data & 8 != 0;
+        self.show_sprites = data & 16 != 0;
+        self.emphasize_red = data & 32 != 0;
+        self.emphasize_green = data & 64 != 0;
+        self.emphasize_blue = data & 128 != 0;
+    }
+
+    fn render_disabled(&self) -> bool {
+        !self.show_background && !self.show_sprites
+    }
+}
+
+struct Status {
+    sprite_overflow: bool,
+    sprite_zero_hit: bool,
+    vblank: bool,
+}
+impl Status {
+    fn init() -> Self {
+        Self {
+            sprite_overflow: false,
+            sprite_zero_hit: false,
+            vblank: false,
+        }
+    }
+
+    fn get_read(&mut self) -> u8 {
+        let overflow = (self.sprite_overflow as u8) << 5;
+        let hit = (self.sprite_zero_hit as u8) << 6;
+        let blank = (self.vblank as u8) << 7;
+        self.vblank = false;
+
+        overflow | hit | blank
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Scroll {
+    x: (u8, bool),
+    y: (u8, bool),
+}
+impl Scroll {
+    pub fn init() -> Self {
+        Self {
+            x: (0, false),
+            y: (0, false),
+        }
+    }
+
+    pub fn write_low(&mut self, value: u8) {
+        self.x.0 = self.y.0;
+        self.y.0 = value;
+    }
+    pub fn write_high(&mut self, x: bool, y: bool) {
+        self.x.1 = x;
+        self.y.1 = y;
+    }
+}
+
+struct Fetch {
+    fetching: bool,
+    awaiting: Awaiting,
+    cycle: u16,
+    nametable: u16,
+    pattern_table: u16,
+    palette: u16,
+    background: bool,
+}
+impl Fetch {
+    fn init() -> Self {
+        Self {
+            awaiting: Awaiting::None,
+            fetching: false,
+            cycle: 0,
+            nametable: 0,
+            pattern_table: 0,
+            palette: 0,
+            background: false,
+        }
+    }
+
+    fn start_fetch(&mut self) {
+        self.cycle = 0;
+        self.fetching = true;
+        self.nametable = 0;
+        self.pattern_table = 0;
+        self.palette = 0;
+        self.background = false;
+    }
+}
+
+enum Awaiting {
+    None,
+    Name,
+    Pattern,
+    Palette,
+    Background,
+}
+
+struct Graphics {
+    nametable: Box<[u8; 4096]>,
+    pattern_table: Box<[u8; 8192]>,
+    background: u8,
+    palette: [[u8; 3]; 8],
+}
+impl Graphics {
+    fn init() -> Self {
+        Self {
+            nametable: Box::new([0; 4096]),
+            pattern_table: Box::new([0; 8192]),
+            background: 0,
+            palette: [[0; 3]; 8],
         }
     }
 }

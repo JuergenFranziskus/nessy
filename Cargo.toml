@@ -5,4 +5,14 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[profile.release]
+debug = true
+
+
 [dependencies]
+winit = "0.28.6"
+pixely = { git = "https://github.com/JuergenFranziskus/pixely.git" }
+wgpu = "0.16.0"
+futures = "0.3.28"
+spin_sleep = "1.1.1"
+parking_lot = "0.12.1"

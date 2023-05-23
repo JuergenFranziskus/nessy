@@ -964,7 +964,7 @@ impl Cpu {
             self.nmi_pending = false;
             self.sync_state(Opcode::BRK, AddressMode::Implied);
             self.state.break_mode = BreakMode::nmi();
-        } else if self.irq_pending {
+        } else if self.irq_pending && !self.flags.irq_disable {
             self.sync_state(Opcode::BRK, AddressMode::Implied);
             self.state.break_mode = BreakMode::irq();
         } else {

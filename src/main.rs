@@ -1,9 +1,9 @@
 use futures::executor::block_on;
+use nessy::cpu::InPins as CPins;
 use nessy::{
     cpu::Cpu,
     mapper::{nrom::NRom, Mapper},
     nes::Nes,
-    processor::InPins as RPins,
     processor::OutPins,
     rom::Rom,
 };
@@ -21,7 +21,7 @@ use wgpu::{
     PowerPreference, Queue, RequestAdapterOptions,
 };
 use winit::{
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     platform::run_return::EventLoopExtRunReturn,
     window::{Window, WindowBuilder},
@@ -37,29 +37,7 @@ fn main() {
     let thread_running = Arc::new(AtomicBool::new(true));
     let thread_running_clone = Arc::clone(&thread_running);
 
-    let run_thread = std::thread::spawn(move || {
-        let cycles = CYCLES_PER_FRAME.floor() as usize;
-        let frame_time = Duration::from_secs_f64(1.0 / 60.0);
-
-        loop {
-            if !thread_running.load(Ordering::SeqCst) {
-                break;
-            }
-
-            let start = Instant::now();
-            let mut nes = nes.lock();
-            for _ in 0..cycles {
-                nes.master_cycle();
-            }
-            drop(nes);
-
-            let frame_took = start.elapsed();
-            if frame_time >= frame_took {
-                let to_sleep = frame_time - frame_took;
-                spin_sleep::sleep(to_sleep);
-            }
-        }
-    });
+    let run_thread = std::thread::spawn(move || emulator_thread(nes, thread_running));
 
     let nes = nes_clone;
     let thread_running = thread_running_clone;
@@ -78,6 +56,7 @@ fn main() {
                 WindowEvent::Resized(size) => {
                     pixels.resize_surface(size.width as usize, size.height as usize);
                 }
+                WindowEvent::KeyboardInput { input, .. } => handle_keyboard_input(&nes, input),
                 _ => (),
             },
             Event::MainEventsCleared => {
@@ -114,6 +93,65 @@ fn main() {
     run_thread.join().unwrap();
 }
 
+const DEBUG: bool = false;
+
+fn emulator_thread<M: Mapper>(nes: Arc<Mutex<Nes<M>>>, running: Arc<AtomicBool>) {
+    let cycles = CYCLES_PER_FRAME.floor() as usize;
+    let frame_time = Duration::from_secs_f64(1.0 / 60.0);
+    let mut print_instruction = false;
+    let mut total_cycles = 0;
+
+    loop {
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
+        let start = Instant::now();
+        let mut nes = nes.lock();
+        for _ in 0..cycles {
+            nes.master_cycle();
+
+            let debug = nes.processor().cpu_cycle() == 11;
+            if debug && DEBUG {
+                nes.force_update_pins();
+                print_cycle_debug(
+                    total_cycles,
+                    nes.processor().cpu_pins(),
+                    nes.processor().out(),
+                    nes.cpu(),
+                    print_instruction,
+                );
+                print_instruction = nes.processor().out().sync;
+                total_cycles += 1;
+            }
+        }
+        drop(nes);
+        let frame_took = start.elapsed();
+        if frame_time >= frame_took {
+            let to_sleep = frame_time - frame_took;
+            spin_sleep::sleep(to_sleep);
+        }
+    }
+}
+fn handle_keyboard_input<M>(nes: &Mutex<Nes<M>>, input: KeyboardInput) {
+    use VirtualKeyCode::*;
+    let Some(keycode) = input.virtual_keycode else { return };
+    let button = match keycode {
+        A => 0,
+        S => 1,
+        Tab => 2,
+        Return => 3,
+        I => 4,
+        K => 5,
+        J => 6,
+        L => 7,
+        _ => return,
+    };
+    let pressed = input.state != ElementState::Released;
+
+    let mut nes = nes.lock();
+    nes.joysticks_mut().set_button(0, button, pressed);
+}
+
 fn init_framebuffer(gpu: &GPU, window: &Window) -> Pixely {
     let size = window.inner_size();
 
@@ -147,7 +185,7 @@ fn start_console() -> Nes<impl Mapper> {
 }
 
 #[allow(dead_code)]
-fn print_cycle_debug(cycle: isize, pins: RPins, out: OutPins, cpu: &Cpu, print_instruction: bool) {
+fn print_cycle_debug(cycle: isize, pins: CPins, out: OutPins, cpu: &Cpu, print_instruction: bool) {
     let data = if out.read { pins.data } else { out.data };
     let address = out.address;
     let rw = if out.read { "     " } else { "WRITE" };

@@ -61,6 +61,10 @@ impl<M> Nes<M> {
     pub fn vram(&self) -> &[u8] {
         &self.vram
     }
+
+    pub fn joysticks_mut(&mut self) -> &mut Joystick {
+        &mut self.joystick
+    }
 }
 impl<M: Mapper> Nes<M> {
     pub fn master_cycle(&mut self) {

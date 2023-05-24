@@ -17,7 +17,7 @@ pub struct Ppu {
     mask: Mask,
     status: Status,
 
-    oam_memory: [u8; 256],
+    oam_memory: Box<[u8; 256]>,
     oam_address: u8,
     scroll: Scroll,
     address: u16,
@@ -29,7 +29,7 @@ pub struct Ppu {
 
     fetch: Fetch,
     graphics: Graphics,
-    framebuffer: [[u8; 3]; 256 * 240],
+    framebuffer: Box<[[u8; 3]; 256 * 240]>,
     out: OutPins,
 }
 impl Ppu {
@@ -42,7 +42,7 @@ impl Ppu {
             mask: Mask::init(),
             status: Status::init(),
 
-            oam_memory: [0; 256],
+            oam_memory: Box::new([0; 256]),
             oam_address: 0,
             scroll: Scroll::init(),
             address: 0,
@@ -54,7 +54,7 @@ impl Ppu {
 
             fetch: Fetch::init(),
             graphics: Graphics::init(),
-            framebuffer: [[0; 3]; 256 * 240],
+            framebuffer: Box::new([[0; 3]; 256 * 240]),
             out: OutPins::init(),
         }
     }
@@ -314,7 +314,10 @@ impl Ppu {
             return;
         }
         if self.mask.render_disabled() {
-            self.framebuffer = [color_to_rgb(self.graphics.background); 256 * 240];
+            let color = color_to_rgb(self.graphics.background);
+            for pixel in &mut *self.framebuffer {
+                *pixel = color;
+            }
             return;
         }
 

@@ -40,13 +40,14 @@ impl Cpu {
         (cpu, pins)
     }
     pub fn cycle(&mut self, pins: InPins) -> OutPins {
+        self.out.read = true;
+        self.out.halted = false;
+
         let mut backup = None;
         if !pins.ready {
             backup = Some(*self)
         }
 
-        self.out.read = true;
-        self.out.halted = false;
         if self.out.sync {
             // If you're reading this later, reminder:
             // The interrupt logic goes in 'fetch', not here.

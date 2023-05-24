@@ -50,12 +50,19 @@ impl Joystick {
             1
         } else {
             self.indices[pad] += 1;
-            buttons[index] as u8
+            let value = buttons[index] as u8;
+            value
         }
     }
 
     pub fn out(&self) -> OutPins {
         self.out
+    }
+
+    pub fn set_button(&mut self, pad: u8, button: u8, pressed: bool) {
+        let pad = pad as usize;
+        let button = button as usize;
+        self.pads[pad][button] = pressed;
     }
 }
 

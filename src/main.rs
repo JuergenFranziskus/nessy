@@ -109,7 +109,6 @@ fn emulator_thread<M: Mapper>(nes: Arc<Mutex<Nes<M>>>, running: Arc<AtomicBool>)
         let mut nes = nes.lock();
         for _ in 0..cycles {
             nes.master_cycle();
-
             let debug = nes.processor().cpu_cycle() == 11;
             if debug && DEBUG {
                 nes.force_update_pins();
@@ -126,6 +125,7 @@ fn emulator_thread<M: Mapper>(nes: Arc<Mutex<Nes<M>>>, running: Arc<AtomicBool>)
         }
         drop(nes);
         let frame_took = start.elapsed();
+        eprintln!("Frame took {} milliseconds", frame_took.as_millis());
         if frame_time >= frame_took {
             let to_sleep = frame_time - frame_took;
             spin_sleep::sleep(to_sleep);
@@ -174,7 +174,7 @@ fn init_framebuffer(gpu: &GPU, window: &Window) -> Pixely {
 }
 
 fn start_console() -> Nes<impl Mapper> {
-    let rom_src = std::fs::read("roms/DonkeyKong.nes").unwrap();
+    let rom_src = std::fs::read("roms/MarioBros.nes").unwrap();
     let rom = Rom::parse(&rom_src);
     eprintln!("{:#?}", rom.header);
 

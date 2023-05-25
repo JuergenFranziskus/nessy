@@ -135,10 +135,9 @@ impl<M: Mapper> Nes<M> {
 
         self.busses.ppu_data = 0;
         if ppu_out.write_enable {
-            self.busses.ppu_data |= self.ppu_data();
-        }
-        if let Some(data) = map_out.ppu_data {
-            self.busses.ppu_data |= data;
+            self.busses.ppu_data = self.ppu_data();
+        } else if let Some(data) = map_out.ppu_data {
+            self.busses.ppu_data = data;
         }
 
         self.update_ppu_memory();
@@ -192,20 +191,17 @@ impl<M: Mapper> Nes<M> {
 
         self.busses.processor_data = 0;
         if !cpu_out.read {
-            self.busses.processor_data |= cpu_out.data;
-        }
-        if let Some(data) = map_out.cpu_data {
-            self.busses.processor_data |= data;
-        }
-        if let Some(data) = ppu_out.cpu_data {
-            self.busses.processor_data |= data;
-        }
-        if let Some(data) = joy_out.data {
-            self.busses.processor_data |= data;
+            self.busses.processor_data = cpu_out.data;
+        } else if let Some(data) = map_out.cpu_data {
+            self.busses.processor_data = data;
+        } else if let Some(data) = ppu_out.cpu_data {
+            self.busses.processor_data = data;
+        } else if let Some(data) = joy_out.data {
+            self.busses.processor_data = data;
         }
         if ppu_out.cross_data_busses {
             // Required for addressing ppu memory thru $PPUDATA
-            self.busses.processor_data |= self.busses.ppu_data;
+            self.busses.processor_data = self.busses.ppu_data;
         }
 
         self.update_cpu_memory();

@@ -318,6 +318,7 @@ impl Ppu {
             for pixel in &mut *self.framebuffer {
                 *pixel = color;
             }
+            self.status.sprite_zero_hit = false;
             return;
         }
 
@@ -325,12 +326,17 @@ impl Ppu {
             &mut self.framebuffer,
             &self.graphics.pattern_table,
             &self.graphics.nametable,
+            &self.oam_memory,
+            self.control.sprite_pattern_table,
+            self.control.wide_sprites,
             self.control.background_pattern_table,
             self.graphics.background,
             self.graphics.palette,
             self.scroll,
         );
-        renderer.render();
+        let (hit, overflow) = renderer.render();
+        self.status.sprite_zero_hit = hit;
+        self.status.sprite_overflow = overflow;
     }
 
     pub fn out(&self) -> OutPins {

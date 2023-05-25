@@ -215,10 +215,9 @@ impl Cpu {
         match self.state.address_mode_cycles {
             0 => self.read_pc_byte(),
             1 => {
-                self.start_address_operand(pins.data);
+                self.start_address_operand(pins.data.wrapping_add(offset));
             }
             2 => {
-                self.add_address(offset);
                 if self.ignore_operand() {
                     return true;
                 } else {
@@ -267,6 +266,7 @@ impl Cpu {
             }
             2 => {
                 self.finish_address_operand(pins.data);
+                let old = self.address();
                 let carry = self.add_address(offset);
                 if carry {
                     self.cross_page();
@@ -328,8 +328,7 @@ impl Cpu {
                 false
             }
             1 => {
-                self.start_address_operand(pins.data);
-                self.add_address(self.x);
+                self.start_address_operand(pins.data.wrapping_add(self.x));
                 false
             }
             2 => {
@@ -414,10 +413,6 @@ impl Cpu {
     }
 
     fn exec_adc(&mut self, pins: InPins) {
-        assert!(
-            !self.flags.decimal,
-            "Decimal mode is not implemented (yet?)"
-        );
         debug_assert_eq!(
             self.state.opcode_cycles, 0,
             "ADC should never be executed with cycle != 0"
@@ -756,24 +751,20 @@ impl Cpu {
         }
     }
     fn exec_sbc(&mut self, pins: InPins) {
-        assert!(
-            !self.flags.decimal,
-            "Decimal mode is not implemented (yet?)"
-        );
         debug_assert_eq!(
             self.state.opcode_cycles, 0,
             "SBC should never be executed with cycle != 0"
         );
 
         let b = pins.data;
-        let (a, carry) = self.a.borrowing_sub(b, self.flags.carry);
+        let (a, carry) = self.a.borrowing_sub(b, !self.flags.carry);
 
         let signed_a = self.a.sign_cast();
         let signed_b = b.sign_cast();
         let (_, overflow) = signed_a.borrowing_sub(signed_b, self.flags.carry);
 
         self.a = a;
-        self.flags.carry = carry;
+        self.flags.carry = !carry;
         self.flags.overflow = overflow;
         self.set_regular_flags(a);
 
@@ -851,7 +842,7 @@ impl Cpu {
         let op = |x, flags: &mut Flags| {
             let old_carry = flags.carry as u8;
             flags.carry = x & 128 != 0;
-            (x << 1) & old_carry
+            (x << 1) | old_carry
         };
 
         self.exec_rmw(pins, op);
@@ -860,7 +851,7 @@ impl Cpu {
         let op = |x, flags: &mut Flags| {
             let old_carry = (flags.carry as u8) << 7;
             flags.carry = x & 1 != 0;
-            (x >> 1) & old_carry
+            (x >> 1) | old_carry
         };
 
         self.exec_rmw(pins, op);
@@ -985,7 +976,7 @@ impl Cpu {
     }
     fn add_address(&mut self, offset: u8) -> bool {
         let new_address = self.address().wrapping_add(offset as u16);
-        let carry = new_address & 0xFF00 != self.address() & 0xFF00;
+        let carry = (new_address & 0xFF00) != (self.address() & 0xFF00);
         self.set_address(new_address);
         carry
     }

@@ -20,10 +20,10 @@ impl Joystick {
     }
 
     pub fn master_cycle(&mut self, pins: InPins) {
-        self.service_cpu(pins);
         if self.strobe {
             self.indices = [0; 2];
         }
+        self.service_cpu(pins);
         self.last_m2 = pins.cpu_m2;
     }
 
@@ -47,10 +47,10 @@ impl Joystick {
         let buttons = self.pads[pad];
 
         if index >= 8 {
-            1
+            0x41
         } else {
             self.indices[pad] += 1;
-            let value = buttons[index] as u8;
+            let value = if buttons[index] { 0x41 } else { 0x40 };
             value
         }
     }

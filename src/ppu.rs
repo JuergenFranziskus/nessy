@@ -1,3 +1,5 @@
+use crate::nes::NesBus;
+
 use self::renderer::{color_to_rgb, Renderer};
 
 const CYCLES_PER_LINE: u32 = 341;
@@ -17,10 +19,14 @@ pub struct Ppu {
     mask: Mask,
     status: Status,
 
+    palette_memory: Box<[u8; 0x20]>,
     oam_memory: Box<[u8; 256]>,
     oam_address: u8,
     scroll: Scroll,
-    address: u16,
+
+    ppudata_address: u16,
+    ppudata_latch: u8,
+    ppudata_update: PpuDataUpdate,
 
     render_cycle: u32,
     odd_frame: bool,
@@ -30,7 +36,6 @@ pub struct Ppu {
     fetch: Fetch,
     graphics: Graphics,
     framebuffer: Box<[[u8; 3]; 256 * 240]>,
-    out: OutPins,
 }
 impl Ppu {
     pub fn new() -> Self {
@@ -42,10 +47,14 @@ impl Ppu {
             mask: Mask::init(),
             status: Status::init(),
 
+            palette_memory: Box::new([0; 0x20]),
             oam_memory: Box::new([0; 256]),
             oam_address: 0,
             scroll: Scroll::init(),
-            address: 0,
+
+            ppudata_address: 0,
+            ppudata_latch: 0,
+            ppudata_update: PpuDataUpdate::UpToDate,
 
             render_cycle: 0,
             odd_frame: false,
@@ -55,18 +64,17 @@ impl Ppu {
             fetch: Fetch::init(),
             graphics: Graphics::init(),
             framebuffer: Box::new([[0; 3]; 256 * 240]),
-            out: OutPins::init(),
         }
     }
 
-    pub fn master_cycle(&mut self, pins: InPins) {
+    pub fn master_cycle(&mut self, bus: &mut NesBus) {
         if self.should_cycle_ppu() {
-            self.ppu_cycle(pins);
+            self.ppu_cycle(bus);
         }
 
-        self.service_cpu(pins);
+        self.service_cpu(bus);
         self.tick_counter();
-        self.last_m2 = pins.cpu_m2;
+        self.last_m2 = bus.cpu_m2;
     }
     fn should_cycle_ppu(&self) -> bool {
         self.master_cycle == 0
@@ -76,115 +84,142 @@ impl Ppu {
         self.master_cycle %= 4;
     }
 
-    fn ppu_cycle(&mut self, pins: InPins) {
-        self.out.ale = false;
-        self.out.read_enable = false;
-        self.out.write_enable = false;
+    fn ppu_cycle(&mut self, bus: &mut NesBus) {
+        bus.ppu_read_enable = false;
+        bus.ppu_write_enable = false;
 
-        self.decide_nmi();
-        self.perform_mem_op();
-        self.fetch_graphics(pins);
+        self.decide_nmi(bus);
+        self.perform_mem_op(bus);
+        self.update_ppudata_latch(bus);
+        self.fetch_graphics(bus);
         self.render();
         self.tick_pixel();
     }
-    fn service_cpu(&mut self, pins: InPins) {
-        let m2_edge = self.last_m2 != pins.cpu_m2;
-        if !m2_edge || !pins.cpu_m2 {
+    fn service_cpu(&mut self, bus: &mut NesBus) {
+        let m2_edge = self.last_m2 != bus.cpu_m2;
+        if !m2_edge || !bus.cpu_m2 {
             return;
         }
 
-        self.out.cross_data_busses = false;
-        self.out.cpu_data = None;
-        let in_range = (0x2000..0x4000).contains(&pins.cpu_address);
+        let in_range = (0x2000..0x4000).contains(&bus.cpu_address);
         if !in_range {
             return;
         }
 
-        let address = pins.cpu_address as usize % 8;
+        let address = bus.cpu_address as usize % 8;
         match address {
             0 => {
-                if pins.cpu_read {
+                if bus.cpu_read {
                     return;
                 }
 
-                self.control.reconfig(pins.cpu_data);
-                let high_x = pins.cpu_data & 1 != 0;
-                let high_y = pins.cpu_data & 2 != 0;
+                self.control.reconfig(bus.cpu_data);
+                let high_x = bus.cpu_data & 1 != 0;
+                let high_y = bus.cpu_data & 2 != 0;
                 self.scroll.write_high(high_x, high_y);
             }
             1 => {
-                if pins.cpu_read {
+                if bus.cpu_read {
                     return;
                 }
 
-                self.mask.reconfig(pins.cpu_data);
+                self.mask.reconfig(bus.cpu_data);
             }
             2 => {
-                self.out.cpu_data = Some(self.status.get_read());
-                self.address = 0;
+                if !bus.cpu_read {
+                    return;
+                }
+
+                bus.cpu_data = self.status.get_read();
+                self.ppudata_address = 0;
                 self.scroll = Scroll::init();
             }
             3 => {
-                if pins.cpu_read {
+                if bus.cpu_read {
                     return;
                 }
-                self.oam_address = pins.cpu_data;
+                self.oam_address = bus.cpu_data;
             }
             4 => {
                 let address = self.oam_address as usize;
-                if pins.cpu_read {
-                    self.out.cpu_data = Some(self.oam_memory[address]);
+                if bus.cpu_read {
+                    bus.cpu_data = self.oam_memory[address];
                 } else {
-                    self.oam_memory[address] = pins.cpu_data;
+                    self.oam_memory[address] = bus.cpu_data;
                     self.oam_address = self.oam_address.wrapping_add(1);
                 }
             }
             5 => {
-                if pins.cpu_read {
+                if bus.cpu_read {
                     return;
                 }
 
-                self.scroll.write_low(pins.cpu_data);
+                self.scroll.write_low(bus.cpu_data);
             }
             6 => {
-                if pins.cpu_read {
+                if bus.cpu_read {
                     return;
                 }
 
-                self.address <<= 8;
-                self.address |= pins.cpu_data as u16;
-                self.address %= 0x4000;
+                self.ppudata_address <<= 8;
+                self.ppudata_address |= bus.cpu_data as u16;
+                self.ppudata_address %= 0x4000;
             }
             7 => {
-                if pins.cpu_read {
-                    self.schedule_read(self.address);
-                    self.out.cross_data_busses = true;
+                let address = self.ppudata_address as usize;
+                let palette_range = (0x3F00..).contains(&address);
+                let palette_address = address.wrapping_sub(0x3F00) % 0x20;
+                if bus.cpu_read && palette_range {
+                    bus.cpu_data = self.read_palette_memory(palette_address);
+                    self.increment_ppudata_address();
+                } else if palette_range {
+                    self.write_palette_memory(palette_address, bus.cpu_data);
+                    self.increment_ppudata_address();
+                } else if bus.cpu_read {
+                    bus.cpu_data = self.ppudata_latch;
+                    self.ppudata_update = PpuDataUpdate::Scheduled;
                 } else {
-                    self.schedule_write(self.address, pins.cpu_data);
+                    self.schedule_write(self.ppudata_address, bus.cpu_data);
+                    self.increment_ppudata_address();
                 }
-
-                self.address += self.control.vram_address_increment;
-                self.address %= 0x4000;
             }
             _ => unreachable!("#{address} is not a valid ppu register or is not yet implemented"),
         }
     }
-    fn perform_mem_op(&mut self) {
+    fn perform_mem_op(&mut self, bus: &mut NesBus) {
         let Some(op) = self.scheduled_mem_op.take() else { return };
 
-        let address_high = op.address & !0xFF;
-        self.out.mem_address_data = address_high | op.data.unwrap_or(0) as u16;
-        self.out.read_enable = op.data.is_none();
-        self.out.write_enable = op.data.is_some();
+        bus.ppu_address = op.address;
+        bus.ppu_read_enable = op.data.is_none();
+        bus.ppu_write_enable = op.data.is_some();
+        if let Some(data) = op.data {
+            bus.ppu_data = data;
+        }
     }
-    fn decide_nmi(&mut self) {
+    fn update_ppudata_latch(&mut self, bus: &mut NesBus) {
+        use PpuDataUpdate::*;
+        match self.ppudata_update {
+            UpToDate => (),
+            Scheduled => {
+                self.schedule_read(self.ppudata_address);
+                self.ppudata_update = AwaitingData;
+            }
+            AwaitingData => self.ppudata_update = StillWaiting,
+            StillWaiting => {
+                self.ppudata_latch = bus.ppu_data;
+                self.ppudata_update = UpToDate;
+                self.increment_ppudata_address();
+            }
+        }
+    }
+    fn decide_nmi(&mut self, bus: &mut NesBus) {
         if self.render_cycle == NMI_START {
             self.status.vblank = true;
         } else if self.render_cycle == NMI_END {
             self.status.vblank = false;
         }
 
-        self.out.nmi = self.control.generate_nmi && self.status.vblank;
+        bus.ppu_nmi = self.control.generate_nmi && self.status.vblank;
     }
     fn tick_pixel(&mut self) {
         let final_cycle = if self.odd_frame {
@@ -203,8 +238,6 @@ impl Ppu {
 
     fn schedule_mem_op(&mut self, address: u16, data: Option<u8>) {
         self.scheduled_mem_op = Some(MemOp { address, data });
-        self.out.mem_address_data = address;
-        self.out.ale = true;
     }
     fn schedule_read(&mut self, address: u16) {
         self.schedule_mem_op(address, None);
@@ -213,7 +246,30 @@ impl Ppu {
         self.schedule_mem_op(address, Some(data));
     }
 
-    fn fetch_graphics(&mut self, pins: InPins) {
+    fn read_palette_memory(&self, address: usize) -> u8 {
+        let address = Self::normalize_palette_address(address);
+        self.palette_memory[address]
+    }
+    fn write_palette_memory(&mut self, address: usize, data: u8) {
+        let address = Self::normalize_palette_address(address);
+        self.palette_memory[address] = data;
+    }
+    fn normalize_palette_address(address: usize) -> usize {
+        match address {
+            0x10 => 0x0,
+            0x14 => 0x4,
+            0x18 => 0x8,
+            0x1C => 0xC,
+            _ => address,
+        }
+    }
+
+    fn increment_ppudata_address(&mut self) {
+        self.ppudata_address += self.control.vram_address_increment;
+        self.ppudata_address %= 0x4000;
+    }
+
+    fn fetch_graphics(&mut self, bus: &mut NesBus) {
         if self.mask.render_disabled() {
             return;
         }
@@ -232,22 +288,12 @@ impl Ppu {
         match self.fetch.awaiting {
             Awaiting::None => (),
             Awaiting::Name => {
-                self.graphics.nametable[self.fetch.nametable as usize] = pins.mem_data;
+                self.graphics.nametable[self.fetch.nametable as usize] = bus.ppu_data;
                 self.fetch.nametable += 1;
             }
             Awaiting::Pattern => {
-                self.graphics.pattern_table[self.fetch.pattern_table as usize] = pins.mem_data;
+                self.graphics.pattern_table[self.fetch.pattern_table as usize] = bus.ppu_data;
                 self.fetch.pattern_table += 1;
-            }
-            Awaiting::Palette => {
-                let palette_i = self.fetch.palette as usize / 3;
-                let color_i = self.fetch.palette as usize % 3;
-                self.graphics.palette[palette_i][color_i] = pins.mem_data;
-                self.fetch.palette += 1;
-            }
-            Awaiting::Background => {
-                self.graphics.background = pins.mem_data;
-                self.fetch.background = true;
             }
         }
         self.fetch.awaiting = Awaiting::None;
@@ -257,42 +303,28 @@ impl Ppu {
             1..=256 => {
                 let name_done = self.fetch.nametable >= 4096;
                 let pattern_done = self.fetch.pattern_table >= 8192;
-                let background_done = self.fetch.background;
-                let palette_done = self.fetch.palette >= 24;
 
-                if pattern_done && name_done && background_done && palette_done {
+                if pattern_done && name_done {
                     self.fetch.fetching = false;
                     return;
                 }
 
-                let turn = match self.fetch.cycle % 8 {
+                let turn = match self.fetch.cycle % 4 {
                     0 | 1 if !name_done => Awaiting::Name,
                     0 | 1 => Awaiting::Pattern,
                     2 | 3 if !pattern_done => Awaiting::Pattern,
                     2 | 3 => unreachable!(),
-                    4 | 5 if !background_done => Awaiting::Background,
-                    4 | 5 if !name_done => Awaiting::Name,
-                    4 | 5 => Awaiting::Pattern,
-                    6 | 7 if !palette_done => Awaiting::Palette,
-                    6 | 7 => Awaiting::Pattern,
                     _ => unreachable!(),
                 };
                 let step = self.fetch.cycle % 2;
 
                 let address = match turn {
                     Awaiting::None => {
-                        dbg!(name_done, pattern_done, background_done, palette_done);
+                        dbg!(name_done, pattern_done);
                         panic!()
                     }
                     Awaiting::Name => self.fetch.nametable + 0x2000,
                     Awaiting::Pattern => self.fetch.pattern_table,
-                    Awaiting::Background => 0x3F00,
-                    Awaiting::Palette => {
-                        let palette = self.fetch.palette / 3;
-                        let color = self.fetch.palette % 3;
-                        let offset = palette * 4 + color;
-                        0x3F01 + offset
-                    }
                 };
 
                 match step {
@@ -313,8 +345,9 @@ impl Ppu {
         if self.render_cycle != NMI_START {
             return;
         }
+        let background = self.background();
         if self.mask.render_disabled() {
-            let color = color_to_rgb(self.graphics.background);
+            let color = color_to_rgb(background);
             for pixel in &mut *self.framebuffer {
                 *pixel = color;
             }
@@ -322,6 +355,7 @@ impl Ppu {
             return;
         }
 
+        let palette = self.prepare_palette();
         let renderer = Renderer::new(
             &mut self.framebuffer,
             &self.graphics.pattern_table,
@@ -330,8 +364,8 @@ impl Ppu {
             self.control.sprite_pattern_table,
             self.control.wide_sprites,
             self.control.background_pattern_table,
-            self.graphics.background,
-            self.graphics.palette,
+            background,
+            palette,
             self.scroll,
         );
         let (hit, overflow) = renderer.render();
@@ -339,8 +373,21 @@ impl Ppu {
         self.status.sprite_overflow = overflow;
     }
 
-    pub fn out(&self) -> OutPins {
-        self.out
+    fn background(&self) -> u8 {
+        self.palette_memory[0]
+    }
+    fn prepare_palette(&self) -> [[u8; 3]; 8] {
+        let mem = &self.palette_memory;
+        [
+            [mem[1], mem[2], mem[3]],
+            [mem[5], mem[6], mem[7]],
+            [mem[9], mem[10], mem[11]],
+            [mem[13], mem[14], mem[15]],
+            [mem[17], mem[18], mem[19]],
+            [mem[21], mem[22], mem[23]],
+            [mem[25], mem[26], mem[27]],
+            [mem[29], mem[30], mem[31]],
+        ]
     }
 
     pub fn framebuffer(&self) -> &[[u8; 3]; 256 * 240] {
@@ -353,49 +400,12 @@ struct MemOp {
     data: Option<u8>,
 }
 
-#[derive(Copy, Clone, Debug)]
-pub struct InPins {
-    pub cpu_m2: bool,
-    pub cpu_read: bool,
-    pub cpu_address: u16,
-    pub cpu_data: u8,
-    pub mem_data: u8,
-}
-impl InPins {
-    pub fn init() -> Self {
-        Self {
-            cpu_m2: false,
-            cpu_read: true,
-            cpu_address: 0,
-            cpu_data: 0,
-
-            mem_data: 0,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct OutPins {
-    pub nmi: bool,
-    pub cpu_data: Option<u8>,
-    pub mem_address_data: u16,
-    pub ale: bool,
-    pub read_enable: bool,
-    pub write_enable: bool,
-    pub cross_data_busses: bool,
-}
-impl OutPins {
-    pub fn init() -> Self {
-        Self {
-            nmi: false,
-            cpu_data: None,
-            mem_address_data: 0,
-            ale: false,
-            read_enable: false,
-            write_enable: false,
-            cross_data_busses: false,
-        }
-    }
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PpuDataUpdate {
+    UpToDate,
+    Scheduled,
+    AwaitingData,
+    StillWaiting,
 }
 
 struct Control {
@@ -518,8 +528,6 @@ struct Fetch {
     cycle: u16,
     nametable: u16,
     pattern_table: u16,
-    palette: u16,
-    background: bool,
 }
 impl Fetch {
     fn init() -> Self {
@@ -529,8 +537,6 @@ impl Fetch {
             cycle: 0,
             nametable: 0,
             pattern_table: 0,
-            palette: 0,
-            background: false,
         }
     }
 
@@ -539,8 +545,6 @@ impl Fetch {
         self.fetching = true;
         self.nametable = 0;
         self.pattern_table = 0;
-        self.palette = 0;
-        self.background = false;
     }
 }
 
@@ -548,23 +552,17 @@ enum Awaiting {
     None,
     Name,
     Pattern,
-    Palette,
-    Background,
 }
 
 struct Graphics {
     nametable: Box<[u8; 4096]>,
     pattern_table: Box<[u8; 8192]>,
-    background: u8,
-    palette: [[u8; 3]; 8],
 }
 impl Graphics {
     fn init() -> Self {
         Self {
             nametable: Box::new([0; 4096]),
             pattern_table: Box::new([0; 8192]),
-            background: 0,
-            palette: [[0; 3]; 8],
         }
     }
 }

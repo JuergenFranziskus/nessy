@@ -1,10 +1,7 @@
 use futures::executor::block_on;
-use nessy::cpu::InPins as CPins;
 use nessy::{
-    cpu::Cpu,
     mapper::{nrom::NRom, Mapper},
     nes::Nes,
-    processor::OutPins,
     rom::Rom,
 };
 use parking_lot::Mutex;
@@ -93,13 +90,14 @@ fn main() {
     run_thread.join().unwrap();
 }
 
+#[allow(dead_code)]
 const DEBUG: bool = false;
 
 fn emulator_thread<M: Mapper>(nes: Arc<Mutex<Nes<M>>>, running: Arc<AtomicBool>) {
     let cycles = CYCLES_PER_FRAME.floor() as usize;
     let frame_time = Duration::from_secs_f64(1.0 / 60.0);
-    let mut print_instruction = false;
-    let mut total_cycles = 0;
+    // let mut print_instruction = false;
+    // let mut total_cycles = 0;
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -109,23 +107,9 @@ fn emulator_thread<M: Mapper>(nes: Arc<Mutex<Nes<M>>>, running: Arc<AtomicBool>)
         let mut nes = nes.lock();
         for _ in 0..cycles {
             nes.master_cycle();
-            let debug = nes.processor().cpu_cycle() == 11;
-            if debug && DEBUG {
-                nes.force_update_pins();
-                print_cycle_debug(
-                    total_cycles,
-                    nes.processor().cpu_pins(),
-                    nes.processor().out(),
-                    nes.cpu(),
-                    print_instruction,
-                );
-                print_instruction = nes.processor().out().sync;
-                total_cycles += 1;
-            }
         }
         drop(nes);
         let frame_took = start.elapsed();
-        eprintln!("Frame took {} milliseconds", frame_took.as_millis());
         if frame_time >= frame_took {
             let to_sleep = frame_time - frame_took;
             spin_sleep::sleep(to_sleep);
@@ -184,43 +168,44 @@ fn start_console() -> Nes<impl Mapper> {
     nes
 }
 
-#[allow(dead_code)]
-fn print_cycle_debug(cycle: isize, pins: CPins, out: OutPins, cpu: &Cpu, print_instruction: bool) {
-    let data = if out.read { pins.data } else { out.data };
-    let address = out.address;
-    let rw = if out.read { "     " } else { "WRITE" };
-    let sync = if out.sync { "SYNC" } else { "    " };
-    let nmi = if pins.nmi { "NMI" } else { "   " };
-    let irq = if pins.irq { "IRQ" } else { "   " };
-    let reset = if pins.reset { "RST" } else { "   " };
-
-    let a = cpu.a();
-    let x = cpu.x();
-    let y = cpu.y();
-    let sp = cpu.sp();
-    let pc = cpu.pc();
-
-    let flags = cpu.flags();
-    let c = if flags.carry { "C" } else { " " };
-    let z = if flags.zero { "Z" } else { " " };
-    let i = if flags.irq_disable { "I" } else { " " };
-    let d = if flags.decimal { "D" } else { " " };
-    let v = if flags.overflow { "V" } else { " " };
-    let n = if flags.negative { "N" } else { " " };
-
-    let instr = if print_instruction {
-        format!("{:?} {}", cpu.opcode(), cpu.address_mode())
-    } else {
-        "".to_string()
-    };
-
-    println!(
-        "{cycle:0>4}: {nmi} {irq} {reset} {rw} {sync} {address:0>4x} = {data:>2x}; \
-        {instr:<14}     \
-        A = {a:>2x}, X = {x:>2x}, Y = {y:>2x}, SP = {sp:>2x}, PC = {pc:>4x};  \
-        {n}{v}  {d}{i}{z}{c}"
-    );
-}
+//
+// #[allow(dead_code)]
+// fn print_cycle_debug(cycle: isize, pins: CPins, out: OutPins, cpu: &Cpu, print_instruction: bool) {
+// let data = if out.read { pins.data } else { out.data };
+// let address = out.address;
+// let rw = if out.read { "     " } else { "WRITE" };
+// let sync = if out.sync { "SYNC" } else { "    " };
+// let nmi = if pins.nmi { "NMI" } else { "   " };
+// let irq = if pins.irq { "IRQ" } else { "   " };
+// let reset = if pins.reset { "RST" } else { "   " };
+//
+// let a = cpu.a();
+// let x = cpu.x();
+// let y = cpu.y();
+// let sp = cpu.sp();
+// let pc = cpu.pc();
+//
+// let flags = cpu.flags();
+// let c = if flags.carry { "C" } else { " " };
+// let z = if flags.zero { "Z" } else { " " };
+// let i = if flags.irq_disable { "I" } else { " " };
+// let d = if flags.decimal { "D" } else { " " };
+// let v = if flags.overflow { "V" } else { " " };
+// let n = if flags.negative { "N" } else { " " };
+//
+// let instr = if print_instruction {
+// format!("{:?} {}", cpu.opcode(), cpu.address_mode())
+// } else {
+// "".to_string()
+// };
+//
+// println!(
+// "{cycle:0>4}: {nmi} {irq} {reset} {rw} {sync} {address:0>4x} = {data:>2x}; \
+// {instr:<14}     \
+// A = {a:>2x}, X = {x:>2x}, Y = {y:>2x}, SP = {sp:>2x}, PC = {pc:>4x};  \
+// {n}{v}  {d}{i}{z}{c}"
+// );
+// }
 
 #[allow(dead_code)]
 fn print_vram_debug(vram: &[u8]) {

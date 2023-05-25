@@ -16,11 +16,9 @@ pub struct Cpu {
     irq_pending: bool,
 
     state: State,
-    out: OutPins,
 }
 impl Cpu {
-    pub fn new() -> (Self, InPins) {
-        let pins = InPins::init();
+    pub fn new() -> Self {
         let cpu = Self {
             a: 0,
             x: 0,
@@ -34,52 +32,76 @@ impl Cpu {
 
             flags: Flags::init(),
             state: State::init(),
-            out: OutPins::init(),
         };
 
-        (cpu, pins)
+        cpu
     }
-    pub fn cycle(&mut self, pins: InPins) -> OutPins {
-        self.out.read = true;
-        self.out.halted = false;
+
+    pub fn a(&self) -> u8 {
+        self.a
+    }
+    pub fn x(&self) -> u8 {
+        self.x
+    }
+    pub fn y(&self) -> u8 {
+        self.y
+    }
+    pub fn sp(&self) -> u8 {
+        self.sp
+    }
+    pub fn pc(&self) -> u16 {
+        self.pc
+    }
+    pub fn flags(&self) -> Flags {
+        self.flags
+    }
+    pub fn opcode(&self) -> Opcode {
+        self.state.opcode
+    }
+    pub fn address_mode(&self) -> AddressMode {
+        self.state.address_mode
+    }
+
+    pub fn force_pc(&mut self, value: u16) {
+        self.pc = value;
+    }
+}
+impl Cpu {
+    pub fn cycle(&mut self, bus: &mut impl CpuBus) {
+        bus.set_read(true);
+        bus.set_halted(false);
 
         let mut backup = None;
-        if !pins.ready {
+        if !bus.ready() {
             backup = Some(*self)
         }
 
-        if self.out.sync {
+        if bus.sync() {
             // If you're reading this later, reminder:
             // The interrupt logic goes in 'fetch', not here.
-            self.decode(pins);
-            self.out.sync = false;
+            self.decode(bus);
+            bus.set_sync(false);
         }
 
-        self.exec(pins);
-        self.poll_interrupts(pins);
+        self.exec(bus);
+        self.poll_interrupts(bus);
 
-        if !pins.ready && self.out.read {
+        if !bus.ready() && bus.read() {
             *self = backup.unwrap();
-            self.out.halted = true;
+            bus.set_halted(true);
         }
-
-        self.out
     }
-    fn poll_interrupts(&mut self, pins: InPins) {
-        if !self.last_nmi && pins.nmi {
+    fn poll_interrupts(&mut self, bus: &mut impl CpuBus) {
+        if !self.last_nmi && bus.nmi() {
             self.nmi_pending = true;
         }
-        self.irq_pending = pins.irq;
+        self.irq_pending = bus.irq();
 
-        self.last_nmi = pins.nmi;
+        self.last_nmi = bus.nmi();
     }
 
-    pub fn out(&self) -> OutPins {
-        self.out
-    }
-
-    fn decode(&mut self, pins: InPins) {
-        let (opcode, address_mode) = decode(pins.data);
+    fn decode(&mut self, bus: &mut impl CpuBus) {
+        let (opcode, address_mode) = decode(bus.data());
         self.sync_state(opcode, address_mode);
     }
     fn sync_state(&mut self, opcode: Opcode, address_mode: AddressMode) {
@@ -92,117 +114,117 @@ impl Cpu {
         self.state.page_crossed = false;
     }
 
-    fn exec(&mut self, pins: InPins) {
+    fn exec(&mut self, bus: &mut impl CpuBus) {
         if !self.state.address_mode_done {
-            self.state.address_mode_done = self.exec_address_mode(pins);
+            self.state.address_mode_done = self.exec_address_mode(bus);
         }
 
         if self.state.address_mode_done {
-            self.exec_opcode(pins);
+            self.exec_opcode(bus);
         }
     }
-    fn exec_address_mode(&mut self, pins: InPins) -> bool {
+    fn exec_address_mode(&mut self, bus: &mut impl CpuBus) -> bool {
         use AddressMode::*;
         let done = match self.state.address_mode {
             Implied => true,
             Accumulator => true,
-            Immediate => self.exec_immediate(),
-            Zero => self.exec_zero(pins),
-            ZeroX => self.exec_zero_offset(pins, self.x),
-            ZeroY => self.exec_zero_offset(pins, self.y),
-            Absolute => self.exec_absolute(pins),
-            AbsoluteX => self.exec_absolute_offset(pins, self.x),
-            AbsoluteY => self.exec_absolute_offset(pins, self.y),
-            Indirect => self.exec_indirect(pins),
-            IndirectX => self.exec_indirect_x(pins),
-            IndirectY => self.exec_indirect_y(pins),
-            Relative => self.exec_relative(pins),
+            Immediate => self.exec_immediate(bus),
+            Zero => self.exec_zero(bus),
+            ZeroX => self.exec_zero_offset(bus, self.x),
+            ZeroY => self.exec_zero_offset(bus, self.y),
+            Absolute => self.exec_absolute(bus),
+            AbsoluteX => self.exec_absolute_offset(bus, self.x),
+            AbsoluteY => self.exec_absolute_offset(bus, self.y),
+            Indirect => self.exec_indirect(bus),
+            IndirectX => self.exec_indirect_x(bus),
+            IndirectY => self.exec_indirect_y(bus),
+            Relative => self.exec_relative(bus),
         };
         self.state.address_mode_cycles += 1;
         done
     }
-    fn exec_opcode(&mut self, pins: InPins) {
+    fn exec_opcode(&mut self, bus: &mut impl CpuBus) {
         use Opcode::*;
         match self.state.opcode {
-            ADC => self.exec_adc(pins),
-            AND => self.exec_and(pins),
-            ASL => self.exec_asl(pins),
-            BCC => self.exec_generic_branch(!self.flags.carry),
-            BCS => self.exec_generic_branch(self.flags.carry),
-            BEQ => self.exec_generic_branch(self.flags.zero),
-            BIT => self.exec_bit(pins),
-            BNE => self.exec_generic_branch(!self.flags.zero),
-            BMI => self.exec_generic_branch(self.flags.negative),
-            BPL => self.exec_generic_branch(!self.flags.negative),
-            BVC => self.exec_generic_branch(!self.flags.overflow),
-            BVS => self.exec_generic_branch(self.flags.overflow),
-            BRK => self.exec_brk(pins),
-            CLC => self.exec_clc(),
-            CLD => self.exec_cld(),
-            CLI => self.exec_cli(),
-            CLV => self.exec_clv(),
-            CMP => self.exec_compare(self.a, pins),
-            CPX => self.exec_compare(self.x, pins),
-            CPY => self.exec_compare(self.y, pins),
-            DEC => self.exec_dec(pins),
-            DEX => self.exec_dex(),
-            DEY => self.exec_dey(),
-            EOR => self.exec_eor(pins),
-            INC => self.exec_inc(pins),
-            INX => self.exec_inx(),
-            INY => self.exec_iny(),
-            JMP => self.exec_jmp(),
-            JSR => self.exec_jsr(),
-            LDA => self.exec_lda(pins),
-            LDX => self.exec_ldx(pins),
-            LDY => self.exec_ldy(pins),
-            LSR => self.exec_lsr(pins),
-            NOP => self.exec_nop(),
-            ORA => self.exec_ora(pins),
-            PHA => self.exec_pha(),
-            PHP => self.exec_php(),
-            PLA => self.exec_pla(pins),
-            PLP => self.exec_plp(pins),
-            SBC => self.exec_sbc(pins),
-            SEC => self.exec_sec(),
-            SED => self.exec_sed(),
-            SEI => self.exec_sei(),
-            STA => self.exec_sta(),
-            STX => self.exec_stx(),
-            STY => self.exec_sty(),
-            TAX => self.exec_transfer(self.a, TransferTarget::X),
-            TAY => self.exec_transfer(self.a, TransferTarget::Y),
-            TSX => self.exec_transfer(self.sp, TransferTarget::X),
-            TXS => self.exec_transfer(self.x, TransferTarget::S),
-            TXA => self.exec_transfer(self.x, TransferTarget::A),
-            TYA => self.exec_transfer(self.y, TransferTarget::A),
-            ROL => self.exec_rol(pins),
-            ROR => self.exec_ror(pins),
-            RTI => self.exec_rti(pins),
-            RTS => self.exec_rts(pins),
+            ADC => self.exec_adc(bus),
+            AND => self.exec_and(bus),
+            ASL => self.exec_asl(bus),
+            BCC => self.exec_generic_branch(!self.flags.carry, bus),
+            BCS => self.exec_generic_branch(self.flags.carry, bus),
+            BEQ => self.exec_generic_branch(self.flags.zero, bus),
+            BIT => self.exec_bit(bus),
+            BNE => self.exec_generic_branch(!self.flags.zero, bus),
+            BMI => self.exec_generic_branch(self.flags.negative, bus),
+            BPL => self.exec_generic_branch(!self.flags.negative, bus),
+            BVC => self.exec_generic_branch(!self.flags.overflow, bus),
+            BVS => self.exec_generic_branch(self.flags.overflow, bus),
+            BRK => self.exec_brk(bus),
+            CLC => self.exec_clc(bus),
+            CLD => self.exec_cld(bus),
+            CLI => self.exec_cli(bus),
+            CLV => self.exec_clv(bus),
+            CMP => self.exec_compare(self.a, bus),
+            CPX => self.exec_compare(self.x, bus),
+            CPY => self.exec_compare(self.y, bus),
+            DEC => self.exec_dec(bus),
+            DEX => self.exec_dex(bus),
+            DEY => self.exec_dey(bus),
+            EOR => self.exec_eor(bus),
+            INC => self.exec_inc(bus),
+            INX => self.exec_inx(bus),
+            INY => self.exec_iny(bus),
+            JMP => self.exec_jmp(bus),
+            JSR => self.exec_jsr(bus),
+            LDA => self.exec_lda(bus),
+            LDX => self.exec_ldx(bus),
+            LDY => self.exec_ldy(bus),
+            LSR => self.exec_lsr(bus),
+            NOP => self.exec_nop(bus),
+            ORA => self.exec_ora(bus),
+            PHA => self.exec_pha(bus),
+            PHP => self.exec_php(bus),
+            PLA => self.exec_pla(bus),
+            PLP => self.exec_plp(bus),
+            SBC => self.exec_sbc(bus),
+            SEC => self.exec_sec(bus),
+            SED => self.exec_sed(bus),
+            SEI => self.exec_sei(bus),
+            STA => self.exec_sta(bus),
+            STX => self.exec_stx(bus),
+            STY => self.exec_sty(bus),
+            TAX => self.exec_transfer(self.a, TransferTarget::X, bus),
+            TAY => self.exec_transfer(self.a, TransferTarget::Y, bus),
+            TSX => self.exec_transfer(self.sp, TransferTarget::X, bus),
+            TXS => self.exec_transfer(self.x, TransferTarget::S, bus),
+            TXA => self.exec_transfer(self.x, TransferTarget::A, bus),
+            TYA => self.exec_transfer(self.y, TransferTarget::A, bus),
+            ROL => self.exec_rol(bus),
+            ROR => self.exec_ror(bus),
+            RTI => self.exec_rti(bus),
+            RTS => self.exec_rts(bus),
         }
         self.state.opcode_cycles += 1;
     }
 
-    fn exec_immediate(&mut self) -> bool {
+    fn exec_immediate(&mut self, bus: &mut impl CpuBus) -> bool {
         match self.state.address_mode_cycles {
             0 => {
-                self.read_pc_byte();
+                self.read_pc_byte(bus);
                 false
             }
             1 => true,
             _ => unreachable!(),
         }
     }
-    fn exec_zero(&mut self, pins: InPins) -> bool {
+    fn exec_zero(&mut self, bus: &mut impl CpuBus) -> bool {
         match self.state.address_mode_cycles {
-            0 => self.read_pc_byte(),
+            0 => self.read_pc_byte(bus),
             1 => {
-                self.start_address_operand(pins.data);
+                self.start_address_operand(bus.data());
                 if self.ignore_operand() {
                     return true;
                 } else {
-                    self.read(self.address());
+                    self.read_address(bus);
                 }
             }
             2 => return true,
@@ -211,17 +233,17 @@ impl Cpu {
 
         false
     }
-    fn exec_zero_offset(&mut self, pins: InPins, offset: u8) -> bool {
+    fn exec_zero_offset(&mut self, bus: &mut impl CpuBus, offset: u8) -> bool {
         match self.state.address_mode_cycles {
-            0 => self.read_pc_byte(),
+            0 => self.read_pc_byte(bus),
             1 => {
-                self.start_address_operand(pins.data.wrapping_add(offset));
+                self.start_address_operand(bus.data().wrapping_add(offset));
             }
             2 => {
                 if self.ignore_operand() {
                     return true;
                 } else {
-                    self.read(self.address() & 0xFF);
+                    self.read(self.address() & 0xFF, bus);
                 }
             }
             3 => return true,
@@ -230,22 +252,22 @@ impl Cpu {
 
         false
     }
-    fn exec_absolute(&mut self, pins: InPins) -> bool {
+    fn exec_absolute(&mut self, bus: &mut impl CpuBus) -> bool {
         match self.state.address_mode_cycles {
             0 => {
-                self.read_pc_byte();
+                self.read_pc_byte(bus);
                 false
             }
             1 => {
-                self.start_address_operand(pins.data);
-                self.read_pc_byte();
+                self.start_address_operand(bus.data());
+                self.read_pc_byte(bus);
                 false
             }
             2 => {
-                self.finish_address_operand(pins.data);
+                self.finish_address_operand(bus.data());
                 let ignores = self.ignore_operand();
                 if !ignores {
-                    self.read_address();
+                    self.read_address(bus);
                 }
                 ignores
             }
@@ -253,20 +275,19 @@ impl Cpu {
             _ => unreachable!(),
         }
     }
-    fn exec_absolute_offset(&mut self, pins: InPins, offset: u8) -> bool {
+    fn exec_absolute_offset(&mut self, bus: &mut impl CpuBus, offset: u8) -> bool {
         match self.state.address_mode_cycles {
             0 => {
-                self.read_pc_byte();
+                self.read_pc_byte(bus);
                 false
             }
             1 => {
-                self.start_address_operand(pins.data);
-                self.read_pc_byte();
+                self.start_address_operand(bus.data());
+                self.read_pc_byte(bus);
                 false
             }
             2 => {
-                self.finish_address_operand(pins.data);
-                let old = self.address();
+                self.finish_address_operand(bus.data());
                 let carry = self.add_address(offset);
                 if carry {
                     self.cross_page();
@@ -274,13 +295,13 @@ impl Cpu {
 
                 let ignores = self.ignore_operand();
                 if !ignores && !self.page_crossed() {
-                    self.read_address();
+                    self.read_address(bus);
                 }
                 ignores
             }
             3 => {
                 if self.page_crossed() {
-                    self.read_address();
+                    self.read_address(bus);
                     false
                 } else {
                     true
@@ -290,62 +311,62 @@ impl Cpu {
             _ => unreachable!(),
         }
     }
-    fn exec_indirect(&mut self, pins: InPins) -> bool {
+    fn exec_indirect(&mut self, bus: &mut impl CpuBus) -> bool {
         match self.state.address_mode_cycles {
             0 => {
-                self.read_pc_byte();
+                self.read_pc_byte(bus);
                 false
             }
             1 => {
-                self.start_address_operand(pins.data);
-                self.read_pc_byte();
+                self.start_address_operand(bus.data());
+                self.read_pc_byte(bus);
                 false
             }
             2 => {
-                self.finish_address_operand(pins.data);
-                self.read_address();
+                self.finish_address_operand(bus.data());
+                self.read_address(bus);
                 false
             }
             3 => {
                 let [low, high] = self.address().to_le_bytes();
                 let low = low.wrapping_add(1);
                 let address = u16::from_le_bytes([low, high]);
-                self.read(address);
-                self.start_address_operand(pins.data);
+                self.read(address, bus);
+                self.start_address_operand(bus.data());
                 false
             }
             4 => {
-                self.finish_address_operand(pins.data);
+                self.finish_address_operand(bus.data());
                 true
             }
             _ => unreachable!(),
         }
     }
-    fn exec_indirect_x(&mut self, pins: InPins) -> bool {
+    fn exec_indirect_x(&mut self, bus: &mut impl CpuBus) -> bool {
         match self.state.address_mode_cycles {
             0 => {
-                self.read_pc_byte();
+                self.read_pc_byte(bus);
                 false
             }
             1 => {
-                self.start_address_operand(pins.data.wrapping_add(self.x));
+                self.start_address_operand(bus.data().wrapping_add(self.x));
                 false
             }
             2 => {
-                self.read_address();
+                self.read_address(bus);
                 false
             }
             3 => {
                 let address = self.address();
-                self.start_address_operand(pins.data);
-                self.read((address + 1) & 0xFF);
+                self.start_address_operand(bus.data());
+                self.read((address + 1) & 0xFF, bus);
                 false
             }
             4 => {
-                self.finish_address_operand(pins.data);
+                self.finish_address_operand(bus.data());
                 let ignore = self.ignore_operand();
                 if !ignore {
-                    self.read_address();
+                    self.read_address(bus);
                 }
                 ignore
             }
@@ -353,25 +374,25 @@ impl Cpu {
             _ => unreachable!(),
         }
     }
-    fn exec_indirect_y(&mut self, pins: InPins) -> bool {
+    fn exec_indirect_y(&mut self, bus: &mut impl CpuBus) -> bool {
         match self.state.address_mode_cycles {
             0 => {
-                self.read_pc_byte();
+                self.read_pc_byte(bus);
                 false
             }
             1 => {
-                self.start_address_operand(pins.data);
-                self.read_address();
+                self.start_address_operand(bus.data());
+                self.read_address(bus);
                 false
             }
             2 => {
                 let address = self.address() + 1;
-                self.start_address_operand(pins.data);
-                self.read(address & 0xFF);
+                self.start_address_operand(bus.data());
+                self.read(address & 0xFF, bus);
                 false
             }
             3 => {
-                self.finish_address_operand(pins.data);
+                self.finish_address_operand(bus.data());
                 let carry = self.add_address(self.y);
                 if carry {
                     self.cross_page()
@@ -379,13 +400,13 @@ impl Cpu {
 
                 let ignores = self.ignore_operand();
                 if !ignores && !carry {
-                    self.read_address();
+                    self.read_address(bus);
                 }
                 ignores
             }
             4 => {
                 if self.page_crossed() {
-                    self.read_address();
+                    self.read_address(bus);
                 }
                 !self.page_crossed()
             }
@@ -393,14 +414,14 @@ impl Cpu {
             _ => unreachable!(),
         }
     }
-    fn exec_relative(&mut self, pins: InPins) -> bool {
+    fn exec_relative(&mut self, bus: &mut impl CpuBus) -> bool {
         match self.state.address_mode_cycles {
             0 => {
-                self.read_pc_byte();
+                self.read_pc_byte(bus);
                 false
             }
             1 => {
-                let offset = pins.data.sign_cast() as i16;
+                let offset = bus.data().sign_cast() as i16;
                 let address = self.pc.wrapping_add_signed(offset);
                 if address & 0xFF00 != self.pc & 0xFF00 {
                     self.cross_page();
@@ -412,13 +433,13 @@ impl Cpu {
         }
     }
 
-    fn exec_adc(&mut self, pins: InPins) {
+    fn exec_adc(&mut self, bus: &mut impl CpuBus) {
         debug_assert_eq!(
             self.state.opcode_cycles, 0,
             "ADC should never be executed with cycle != 0"
         );
 
-        let b = pins.data;
+        let b = bus.data();
         let (a, carry) = self.a.carrying_add(b, self.flags.carry);
 
         let signed_a = self.a.sign_cast();
@@ -430,59 +451,59 @@ impl Cpu {
         self.flags.overflow = overflow;
         self.set_regular_flags(a);
 
-        self.fetch();
+        self.fetch(bus);
     }
-    fn exec_and(&mut self, pins: InPins) {
+    fn exec_and(&mut self, bus: &mut impl CpuBus) {
         debug_assert_eq!(
             self.state.opcode_cycles, 0,
             "AND should never be executed with cycle != 0"
         );
 
-        self.a &= pins.data;
+        self.a &= bus.data();
         self.set_regular_flags(self.a);
 
-        self.fetch();
+        self.fetch(bus);
     }
-    fn exec_asl(&mut self, pins: InPins) {
+    fn exec_asl(&mut self, bus: &mut impl CpuBus) {
         let op = |x, flags: &mut Flags| {
             flags.carry = x & 128 != 0;
             x << 1
         };
 
-        self.exec_rmw(pins, op);
+        self.exec_rmw(bus, op);
     }
-    fn exec_bit(&mut self, pins: InPins) {
+    fn exec_bit(&mut self, bus: &mut impl CpuBus) {
         debug_assert_eq!(
             self.state.opcode_cycles, 0,
             "BIT should never be executed with cycle != 0"
         );
 
-        let b = pins.data;
+        let b = bus.data();
         self.flags.negative = b & 128 != 0;
         self.flags.overflow = b & 64 != 0;
         self.flags.zero = self.a & b == 0;
 
-        self.fetch();
+        self.fetch(bus);
     }
-    fn exec_generic_branch(&mut self, c: bool) {
+    fn exec_generic_branch(&mut self, c: bool, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
                 if c {
                     self.pc = self.address();
                 } else {
-                    self.fetch();
+                    self.fetch(bus);
                 }
             }
             1 => {
                 if !self.page_crossed() {
-                    self.fetch();
+                    self.fetch(bus);
                 }
             }
-            2 => self.fetch(),
+            2 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_brk(&mut self, pins: InPins) {
+    fn exec_brk(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
                 if self.state.break_mode.increment_pc {
@@ -491,272 +512,272 @@ impl Cpu {
             }
             1 => {
                 if self.state.break_mode.write {
-                    self.push(self.pch());
+                    self.push(self.pch(), bus);
                 }
             }
             2 => {
                 if self.state.break_mode.write {
-                    self.push(self.pcl());
+                    self.push(self.pcl(), bus);
                 }
             }
             3 => {
                 let flags = self.flags.to_byte(self.state.break_mode.b_flag);
                 if self.state.break_mode.write {
-                    self.push(flags);
+                    self.push(flags, bus);
                 }
             }
             4 => {
-                self.read(self.state.break_mode.vector);
+                self.read(self.state.break_mode.vector, bus);
             }
             5 => {
-                self.start_address_operand(pins.data);
-                self.read(self.state.break_mode.vector + 1);
+                self.start_address_operand(bus.data());
+                self.read(self.state.break_mode.vector + 1, bus);
             }
             6 => {
                 if self.state.break_mode.set_irq_disable {
                     self.flags.irq_disable = true;
                 }
-                self.finish_address_operand(pins.data);
+                self.finish_address_operand(bus.data());
                 self.pc = self.state.address;
-                self.fetch();
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
-    fn exec_clc(&mut self) {
+    fn exec_clc(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => self.flags.carry = false,
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_cld(&mut self) {
+    fn exec_cld(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => self.flags.decimal = false,
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_cli(&mut self) {
+    fn exec_cli(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => self.flags.irq_disable = false,
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_clv(&mut self) {
+    fn exec_clv(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => self.flags.overflow = false,
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_compare(&mut self, a: u8, pins: InPins) {
+    fn exec_compare(&mut self, a: u8, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
-                let b = pins.data;
+                let b = bus.data();
                 let (result, carry) = a.overflowing_sub(b);
                 self.flags.carry = !carry;
                 self.set_regular_flags(result);
-                self.fetch();
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
-    fn exec_dec(&mut self, pins: InPins) {
+    fn exec_dec(&mut self, bus: &mut impl CpuBus) {
         let op = |x: u8, _: &mut Flags| x.wrapping_sub(1);
-        self.exec_rmw(pins, op);
+        self.exec_rmw(bus, op);
     }
-    fn exec_dex(&mut self) {
+    fn exec_dex(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
                 let value = self.x.wrapping_sub(1);
                 self.set_regular_flags(value);
                 self.x = value;
             }
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_dey(&mut self) {
+    fn exec_dey(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
                 let value = self.y.wrapping_sub(1);
                 self.set_regular_flags(value);
                 self.y = value;
             }
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_eor(&mut self, pins: InPins) {
+    fn exec_eor(&mut self, bus: &mut impl CpuBus) {
         debug_assert_eq!(
             self.state.opcode_cycles, 0,
             "EOR should never be executed with cycle != 0"
         );
 
-        self.a ^= pins.data;
+        self.a ^= bus.data();
         self.set_regular_flags(self.a);
 
-        self.fetch();
+        self.fetch(bus);
     }
-    fn exec_inc(&mut self, pins: InPins) {
+    fn exec_inc(&mut self, bus: &mut impl CpuBus) {
         let op = |x: u8, _: &mut Flags| x.wrapping_add(1);
-        self.exec_rmw(pins, op);
+        self.exec_rmw(bus, op);
     }
-    fn exec_inx(&mut self) {
+    fn exec_inx(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
                 let value = self.x.wrapping_add(1);
                 self.set_regular_flags(value);
                 self.x = value;
             }
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_iny(&mut self) {
+    fn exec_iny(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
                 let value = self.y.wrapping_add(1);
                 self.set_regular_flags(value);
                 self.y = value;
             }
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_jmp(&mut self) {
+    fn exec_jmp(&mut self, bus: &mut impl CpuBus) {
         debug_assert_eq!(self.state.opcode_cycles, 0);
         self.pc = self.state.address;
-        self.fetch();
+        self.fetch(bus);
     }
-    fn exec_jsr(&mut self) {
+    fn exec_jsr(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
                 self.pc -= 1;
-                self.push(self.pch());
+                self.push(self.pch(), bus);
             }
             1 => {
-                self.push(self.pcl());
+                self.push(self.pcl(), bus);
                 self.pc = self.state.address;
             }
             2 => {
-                self.fetch();
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
-    fn exec_lda(&mut self, pins: InPins) {
+    fn exec_lda(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
-                self.a = pins.data;
+                self.a = bus.data();
                 self.set_regular_flags(self.a);
-                self.fetch();
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
-    fn exec_ldx(&mut self, pins: InPins) {
+    fn exec_ldx(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
-                self.x = pins.data;
+                self.x = bus.data();
                 self.set_regular_flags(self.x);
-                self.fetch();
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
-    fn exec_ldy(&mut self, pins: InPins) {
+    fn exec_ldy(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
-                self.y = pins.data;
+                self.y = bus.data();
                 self.set_regular_flags(self.y);
-                self.fetch();
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
-    fn exec_lsr(&mut self, pins: InPins) {
+    fn exec_lsr(&mut self, bus: &mut impl CpuBus) {
         let op = |x, flags: &mut Flags| {
             flags.carry = x & 1 != 0;
             x >> 1
         };
 
-        self.exec_rmw(pins, op);
+        self.exec_rmw(bus, op);
     }
-    fn exec_nop(&mut self) {
+    fn exec_nop(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => (),
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_ora(&mut self, pins: InPins) {
+    fn exec_ora(&mut self, bus: &mut impl CpuBus) {
         debug_assert_eq!(
             self.state.opcode_cycles, 0,
             "EOR should never be executed with cycle != 0"
         );
 
-        self.a |= pins.data;
+        self.a |= bus.data();
         self.set_regular_flags(self.a);
 
-        self.fetch();
+        self.fetch(bus);
     }
-    fn exec_pha(&mut self) {
+    fn exec_pha(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => (),
             1 => {
-                self.push(self.a);
+                self.push(self.a, bus);
             }
-            2 => self.fetch(),
+            2 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_php(&mut self) {
+    fn exec_php(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => (),
             1 => {
-                self.push(self.flags.to_byte(true));
+                self.push(self.flags.to_byte(true), bus);
             }
-            2 => self.fetch(),
+            2 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_pla(&mut self, pins: InPins) {
+    fn exec_pla(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => (),
             1 => {
-                self.pop();
+                self.pop(bus);
             }
             2 => {
-                self.a = pins.data;
+                self.a = bus.data();
                 self.set_regular_flags(self.a);
-                self.fetch();
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
-    fn exec_plp(&mut self, pins: InPins) {
+    fn exec_plp(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => (),
             1 => {
-                self.pop();
+                self.pop(bus);
             }
             2 => {
-                self.flags = Flags::from_byte(pins.data);
-                self.fetch();
+                self.flags = Flags::from_byte(bus.data());
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
-    fn exec_sbc(&mut self, pins: InPins) {
+    fn exec_sbc(&mut self, bus: &mut impl CpuBus) {
         debug_assert_eq!(
             self.state.opcode_cycles, 0,
             "SBC should never be executed with cycle != 0"
         );
 
-        let b = pins.data;
+        let b = bus.data();
         let (a, carry) = self.a.borrowing_sub(b, !self.flags.carry);
 
         let signed_a = self.a.sign_cast();
@@ -768,57 +789,57 @@ impl Cpu {
         self.flags.overflow = overflow;
         self.set_regular_flags(a);
 
-        self.fetch();
+        self.fetch(bus);
     }
-    fn exec_sec(&mut self) {
+    fn exec_sec(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => self.flags.carry = true,
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_sed(&mut self) {
+    fn exec_sed(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => self.flags.decimal = true,
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_sei(&mut self) {
+    fn exec_sei(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => self.flags.irq_disable = true,
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_sta(&mut self) {
+    fn exec_sta(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
-                self.write(self.state.address, self.a);
+                self.write(self.state.address, self.a, bus);
             }
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_stx(&mut self) {
+    fn exec_stx(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
-                self.write(self.state.address, self.x);
+                self.write(self.state.address, self.x, bus);
             }
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_sty(&mut self) {
+    fn exec_sty(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
-                self.write(self.state.address, self.y);
+                self.write(self.state.address, self.y, bus);
             }
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_transfer(&mut self, value: u8, into: TransferTarget) {
+    fn exec_transfer(&mut self, value: u8, into: TransferTarget, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => {
                 let target = match into {
@@ -834,95 +855,95 @@ impl Cpu {
                     self.set_regular_flags(value);
                 }
             }
-            1 => self.fetch(),
+            1 => self.fetch(bus),
             _ => unreachable!(),
         }
     }
-    fn exec_rol(&mut self, pins: InPins) {
+    fn exec_rol(&mut self, bus: &mut impl CpuBus) {
         let op = |x, flags: &mut Flags| {
             let old_carry = flags.carry as u8;
             flags.carry = x & 128 != 0;
             (x << 1) | old_carry
         };
 
-        self.exec_rmw(pins, op);
+        self.exec_rmw(bus, op);
     }
-    fn exec_ror(&mut self, pins: InPins) {
+    fn exec_ror(&mut self, bus: &mut impl CpuBus) {
         let op = |x, flags: &mut Flags| {
             let old_carry = (flags.carry as u8) << 7;
             flags.carry = x & 1 != 0;
             (x >> 1) | old_carry
         };
 
-        self.exec_rmw(pins, op);
+        self.exec_rmw(bus, op);
     }
-    fn exec_rts(&mut self, pins: InPins) {
+    fn exec_rts(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => (),
             1 => (),
             2 => {
-                self.pop();
+                self.pop(bus);
             }
             3 => {
-                self.start_address_operand(pins.data);
-                self.pop();
+                self.start_address_operand(bus.data());
+                self.pop(bus);
             }
             4 => {
-                self.finish_address_operand(pins.data);
+                self.finish_address_operand(bus.data());
             }
             5 => {
                 self.pc = self.address() + 1;
-                self.fetch();
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
-    fn exec_rti(&mut self, pins: InPins) {
+    fn exec_rti(&mut self, bus: &mut impl CpuBus) {
         match self.state.opcode_cycles {
             0 => (),
             1 => (),
             2 => {
-                self.pop();
+                self.pop(bus);
             }
             3 => {
-                self.flags = Flags::from_byte(pins.data);
-                self.pop();
+                self.flags = Flags::from_byte(bus.data());
+                self.pop(bus);
             }
             4 => {
-                self.start_address_operand(pins.data);
-                self.pop();
+                self.start_address_operand(bus.data());
+                self.pop(bus);
             }
             5 => {
-                self.finish_address_operand(pins.data);
+                self.finish_address_operand(bus.data());
                 self.pc = self.address();
-                self.fetch();
+                self.fetch(bus);
             }
             _ => unreachable!(),
         }
     }
 
-    fn exec_rmw(&mut self, pins: InPins, op: fn(u8, &mut Flags) -> u8) {
+    fn exec_rmw(&mut self, bus: &mut impl CpuBus, op: fn(u8, &mut Flags) -> u8) {
         if self.state.address_mode == AddressMode::Accumulator {
             match self.state.opcode_cycles {
                 0 => {
                     self.a = op(self.a, &mut self.flags);
                     self.set_regular_flags(self.a);
                 }
-                1 => self.fetch(),
+                1 => self.fetch(bus),
                 _ => unreachable!(),
             }
         } else {
             match self.state.opcode_cycles {
                 0 => {
-                    self.write(self.address(), pins.data);
+                    self.write(self.address(), bus.data(), bus);
                 }
                 1 => {
-                    let old_value = self.out.data;
+                    let old_value = bus.data();
                     let value = op(old_value, &mut self.flags);
                     self.set_regular_flags(value);
-                    self.write(self.address(), value);
+                    self.write(self.address(), value, bus);
                 }
-                2 => self.fetch(),
+                2 => self.fetch(bus),
                 _ => unreachable!(),
             }
         }
@@ -933,25 +954,25 @@ impl Cpu {
         self.flags.negative = value > 127;
     }
 
-    fn read(&mut self, address: u16) {
-        self.out.address = address;
+    fn read(&mut self, address: u16, bus: &mut impl CpuBus) {
+        bus.set_address(address);
     }
-    fn write(&mut self, address: u16, value: u8) {
-        self.out.address = address;
-        self.out.data = value;
-        self.out.read = false;
+    fn write(&mut self, address: u16, value: u8, bus: &mut impl CpuBus) {
+        bus.set_address(address);
+        bus.set_data(value);
+        bus.set_read(false);
     }
-    fn push(&mut self, value: u8) {
+    fn push(&mut self, value: u8, bus: &mut impl CpuBus) {
         let address = 0x100 + self.sp as u16;
         self.sp = self.sp.wrapping_sub(1);
-        self.write(address, value);
+        self.write(address, value, bus);
     }
-    fn pop(&mut self) {
+    fn pop(&mut self, bus: &mut impl CpuBus) {
         self.sp = self.sp.wrapping_add(1);
         let address = 0x100 + self.sp as u16;
-        self.read(address);
+        self.read(address, bus);
     }
-    fn fetch(&mut self) {
+    fn fetch(&mut self, bus: &mut impl CpuBus) {
         if self.nmi_pending {
             self.nmi_pending = false;
             self.sync_state(Opcode::BRK, AddressMode::Implied);
@@ -960,12 +981,12 @@ impl Cpu {
             self.sync_state(Opcode::BRK, AddressMode::Implied);
             self.state.break_mode = BreakMode::irq();
         } else {
-            self.read_pc_byte();
-            self.out.sync = true;
+            self.read_pc_byte(bus);
+            bus.set_sync(true);
         }
     }
-    fn read_pc_byte(&mut self) {
-        self.read(self.pc);
+    fn read_pc_byte(&mut self, bus: &mut impl CpuBus) {
+        self.read(self.pc, bus);
         self.pc += 1;
     }
     fn start_address_operand(&mut self, byte: u8) {
@@ -1001,40 +1022,8 @@ impl Cpu {
     fn set_address(&mut self, address: u16) {
         self.state.address = address;
     }
-    fn read_address(&mut self) {
-        self.read(self.address());
-    }
-
-    pub fn a(&self) -> u8 {
-        self.a
-    }
-    pub fn x(&self) -> u8 {
-        self.x
-    }
-    pub fn y(&self) -> u8 {
-        self.y
-    }
-    pub fn sp(&self) -> u8 {
-        self.sp
-    }
-    pub fn pc(&self) -> u16 {
-        self.pc
-    }
-    pub fn flags(&self) -> Flags {
-        self.flags
-    }
-    pub fn opcode(&self) -> Opcode {
-        self.state.opcode
-    }
-    pub fn address_mode(&self) -> AddressMode {
-        self.state.address_mode
-    }
-
-    pub fn force_pc(&mut self, value: u16) {
-        self.pc = value;
-    }
-    pub fn force_fetch(&mut self) {
-        self.fetch();
+    fn read_address(&mut self, bus: &mut impl CpuBus) {
+        self.read(self.address(), bus);
     }
 }
 
@@ -1162,48 +1151,6 @@ impl State {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct OutPins {
-    pub data: u8,
-    pub address: u16,
-    pub read: bool,
-    pub sync: bool,
-    pub halted: bool,
-}
-impl OutPins {
-    pub fn init() -> OutPins {
-        Self {
-            data: 0,
-            address: 0,
-            read: true,
-            sync: false,
-            halted: false,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct InPins {
-    pub data: u8,
-    pub ready: bool,
-    pub reset: bool,
-    pub irq: bool,
-    pub nmi: bool,
-    pub so: bool,
-}
-impl InPins {
-    pub fn init() -> Self {
-        Self {
-            data: 0,
-            ready: true,
-            reset: false,
-            irq: false,
-            nmi: false,
-            so: false,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum TransferTarget {
     A,
     X,
@@ -1227,4 +1174,23 @@ impl SignCast for i8 {
     fn sign_cast(self) -> Self::FlippedType {
         u8::from_le_bytes(self.to_le_bytes())
     }
+}
+
+pub trait CpuBus {
+    fn address(&self) -> u16;
+    fn set_address(&mut self, addr: u16);
+
+    fn data(&self) -> u8;
+    fn set_data(&mut self, data: u8);
+
+    fn read(&self) -> bool;
+    fn set_read(&mut self, read: bool);
+    fn sync(&self) -> bool;
+    fn set_sync(&mut self, sync: bool);
+    fn halted(&self) -> bool;
+    fn set_halted(&mut self, halted: bool);
+    fn ready(&self) -> bool;
+    fn irq(&self) -> bool;
+    fn nmi(&self) -> bool;
+    fn reset(&self) -> bool;
 }

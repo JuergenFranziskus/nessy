@@ -1,4 +1,5 @@
 use crate::cpu::CpuBus;
+use crate::dma::Dma;
 use crate::joystick::Joystick;
 use crate::ppu::Ppu;
 use crate::{cpu::Cpu, mapper::Mapper};
@@ -8,6 +9,7 @@ pub struct Nes<M> {
     ppu: Ppu,
     mapper: M,
     joystick: Joystick,
+    dma: Dma,
 
     cycle: u64,
     bus: NesBus,
@@ -26,6 +28,7 @@ impl<M> Nes<M> {
             ppu: Ppu::new(),
             mapper,
             joystick: Joystick::new(),
+            dma: Dma::new(),
 
             cycle: 0,
             bus: NesBus::new(),
@@ -50,6 +53,13 @@ impl<M> Nes<M> {
         &self.vram
     }
 
+    pub fn bus(&self) -> &NesBus {
+        &self.bus
+    }
+    pub fn cycle(&self) -> u64 {
+        self.cycle
+    }
+
     pub fn joysticks_mut(&mut self) -> &mut Joystick {
         &mut self.joystick
     }
@@ -71,6 +81,7 @@ impl<M: Mapper> Nes<M> {
         self.ppu.master_cycle(&mut self.bus);
         self.mapper.master_cycle(&mut self.bus);
         self.joystick.master_cycle(&mut self.bus);
+        self.dma.master_cycle(&mut self.bus);
     }
 
     fn cpu_should_cycle(&self) -> bool {
@@ -91,7 +102,7 @@ impl<M: Mapper> Nes<M> {
             return;
         }
 
-        if self.bus.cpu_read {
+        if self.bus.everyone_reads_cpu_bus() {
             self.bus.cpu_data = self.memory[address];
         } else {
             self.memory[address] = self.bus.cpu_data;
@@ -159,6 +170,9 @@ pub struct NesBus {
     pub map_irq: bool,
     pub map_ciram_enable: bool,
     pub map_ciram_a10: bool,
+
+    pub oam_dma_halts_cpu: bool,
+    pub oam_dma_writes: bool,
 }
 impl NesBus {
     pub fn new() -> Self {
@@ -180,7 +194,14 @@ impl NesBus {
             map_irq: false,
             map_ciram_enable: false,
             map_ciram_a10: false,
+
+            oam_dma_halts_cpu: false,
+            oam_dma_writes: false,
         }
+    }
+
+    pub fn everyone_reads_cpu_bus(&self) -> bool {
+        self.cpu_read && !self.oam_dma_writes
     }
 }
 impl CpuBus for NesBus {
@@ -225,7 +246,7 @@ impl CpuBus for NesBus {
     }
 
     fn ready(&self) -> bool {
-        true
+        !self.oam_dma_halts_cpu
     }
 
     fn irq(&self) -> bool {
@@ -239,4 +260,30 @@ impl CpuBus for NesBus {
     fn reset(&self) -> bool {
         self.cpu_reset
     }
+
+    type Backup = NesBusBackup;
+    fn backup(&self) -> Self::Backup {
+        NesBusBackup {
+            address: self.cpu_address,
+            data: self.cpu_data,
+            read: self.cpu_read,
+            sync: self.cpu_sync,
+            halted: self.cpu_halted,
+        }
+    }
+    fn restore(&mut self, backup: Self::Backup) {
+        self.cpu_address = backup.address;
+        self.cpu_data = backup.data;
+        self.cpu_read = backup.read;
+        self.cpu_sync = backup.sync;
+        self.cpu_halted = backup.halted;
+    }
+}
+
+pub struct NesBusBackup {
+    address: u16,
+    data: u8,
+    read: bool,
+    sync: bool,
+    halted: bool,
 }

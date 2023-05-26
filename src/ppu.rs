@@ -142,7 +142,7 @@ impl Ppu {
             }
             4 => {
                 let address = self.oam_address as usize;
-                if bus.cpu_read {
+                if bus.everyone_reads_cpu_bus() {
                     bus.cpu_data = self.oam_memory[address];
                 } else {
                     self.oam_memory[address] = bus.cpu_data;

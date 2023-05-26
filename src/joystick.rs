@@ -32,7 +32,7 @@ impl Joystick {
             return;
         }
 
-        match (bus.cpu_address, bus.cpu_read) {
+        match (bus.cpu_address, bus.everyone_reads_cpu_bus()) {
             (0x4016, false) => self.strobe = bus.cpu_data & 1 != 0,
             (0x4016, true) => bus.cpu_data = self.next_bit(0),
             (0x4017, true) => bus.cpu_data = self.next_bit(1),

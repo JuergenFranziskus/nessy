@@ -1,7 +1,8 @@
 use futures::executor::block_on;
 use nessy::{
+    cpu::{Cpu, CpuBus},
     mapper::{nrom::NRom, Mapper},
-    nes::Nes,
+    nes::{Nes, NesBus},
     rom::Rom,
 };
 use parking_lot::Mutex;
@@ -96,8 +97,8 @@ const DEBUG: bool = false;
 fn emulator_thread<M: Mapper>(nes: Arc<Mutex<Nes<M>>>, running: Arc<AtomicBool>) {
     let cycles = CYCLES_PER_FRAME.floor() as usize;
     let frame_time = Duration::from_secs_f64(1.0 / 60.0);
-    // let mut print_instruction = false;
-    // let mut total_cycles = 0;
+    let mut print_instruction = false;
+    let mut total_cycles = 0;
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -107,6 +108,14 @@ fn emulator_thread<M: Mapper>(nes: Arc<Mutex<Nes<M>>>, running: Arc<AtomicBool>)
         let mut nes = nes.lock();
         for _ in 0..cycles {
             nes.master_cycle();
+            let debug = nes.cycle() % 12 == 11;
+            if debug && DEBUG {
+                let bus = nes.bus();
+                let cpu = nes.cpu();
+                print_cycle_debug(total_cycles, bus, cpu, print_instruction);
+                print_instruction = bus.sync();
+                total_cycles += 1;
+            }
         }
         drop(nes);
         let frame_took = start.elapsed();
@@ -168,44 +177,53 @@ fn start_console() -> Nes<impl Mapper> {
     nes
 }
 
-//
-// #[allow(dead_code)]
-// fn print_cycle_debug(cycle: isize, pins: CPins, out: OutPins, cpu: &Cpu, print_instruction: bool) {
-// let data = if out.read { pins.data } else { out.data };
-// let address = out.address;
-// let rw = if out.read { "     " } else { "WRITE" };
-// let sync = if out.sync { "SYNC" } else { "    " };
-// let nmi = if pins.nmi { "NMI" } else { "   " };
-// let irq = if pins.irq { "IRQ" } else { "   " };
-// let reset = if pins.reset { "RST" } else { "   " };
-//
-// let a = cpu.a();
-// let x = cpu.x();
-// let y = cpu.y();
-// let sp = cpu.sp();
-// let pc = cpu.pc();
-//
-// let flags = cpu.flags();
-// let c = if flags.carry { "C" } else { " " };
-// let z = if flags.zero { "Z" } else { " " };
-// let i = if flags.irq_disable { "I" } else { " " };
-// let d = if flags.decimal { "D" } else { " " };
-// let v = if flags.overflow { "V" } else { " " };
-// let n = if flags.negative { "N" } else { " " };
-//
-// let instr = if print_instruction {
-// format!("{:?} {}", cpu.opcode(), cpu.address_mode())
-// } else {
-// "".to_string()
-// };
-//
-// println!(
-// "{cycle:0>4}: {nmi} {irq} {reset} {rw} {sync} {address:0>4x} = {data:>2x}; \
-// {instr:<14}     \
-// A = {a:>2x}, X = {x:>2x}, Y = {y:>2x}, SP = {sp:>2x}, PC = {pc:>4x};  \
-// {n}{v}  {d}{i}{z}{c}"
-// );
-// }
+#[allow(dead_code)]
+fn print_cycle_debug(cycle: isize, bus: &NesBus, cpu: &Cpu, print_instruction: bool) {
+    let data = bus.cpu_data;
+    let address = bus.cpu_address;
+    let rw = if bus.everyone_reads_cpu_bus() {
+        "     "
+    } else {
+        "WRITE"
+    };
+    let sync = if bus.halted() {
+        "HALT"
+    } else if bus.sync() {
+        "SYNC"
+    } else {
+        "    "
+    };
+    let nmi = if bus.nmi() { "NMI" } else { "   " };
+    let irq = if bus.irq() { "IRQ" } else { "   " };
+    let reset = if bus.reset() { "RST" } else { "   " };
+
+    let a = cpu.a();
+    let x = cpu.x();
+    let y = cpu.y();
+    let sp = cpu.sp();
+    let pc = cpu.pc();
+
+    let flags = cpu.flags();
+    let c = if flags.carry { "C" } else { " " };
+    let z = if flags.zero { "Z" } else { " " };
+    let i = if flags.irq_disable { "I" } else { " " };
+    let d = if flags.decimal { "D" } else { " " };
+    let v = if flags.overflow { "V" } else { " " };
+    let n = if flags.negative { "N" } else { " " };
+
+    let instr = if print_instruction {
+        format!("{:?} {}", cpu.opcode(), cpu.address_mode())
+    } else {
+        "".to_string()
+    };
+
+    println!(
+        "{cycle:0>4}: {nmi} {irq} {reset} {rw} {sync} {address:0>4x} = {data:>2x}; \
+        {instr:<14}     \
+        A = {a:>2x}, X = {x:>2x}, Y = {y:>2x}, SP = {sp:>2x}, PC = {pc:>4x};  \
+        {n}{v}  {d}{i}{z}{c}"
+    );
+}
 
 #[allow(dead_code)]
 fn print_vram_debug(vram: &[u8]) {

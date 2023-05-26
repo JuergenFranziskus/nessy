@@ -9,6 +9,8 @@ pub struct NRom {
     mirror: Mirroring,
 
     last_m2: bool,
+    last_read: bool,
+    last_write: bool,
 }
 
 impl Mapper for NRom {
@@ -17,6 +19,8 @@ impl Mapper for NRom {
         self.service_ppu(bus);
 
         self.last_m2 = bus.cpu_m2;
+        self.last_read = bus.ppu_read_enable;
+        self.last_write = bus.ppu_write_enable;
     }
 }
 impl NRom {
@@ -27,6 +31,8 @@ impl NRom {
             mirror,
 
             last_m2: false,
+            last_read: false,
+            last_write: false,
         }
     }
 
@@ -44,12 +50,16 @@ impl NRom {
             }
             let address = address;
 
-            if bus.cpu_read {
+            if bus.everyone_reads_cpu_bus() {
                 bus.cpu_data = self.prg_rom[address];
             }
         }
     }
     fn service_ppu(&mut self, bus: &mut NesBus) {
+        if !self.ppu_edge(bus) {
+            return;
+        }
+
         let address = bus.ppu_address as usize;
         if address < 0x2000 && bus.ppu_read_enable {
             bus.ppu_data = self.chr_rom[address];
@@ -63,5 +73,13 @@ impl NRom {
             Mirroring::Vertical => a10,
         };
         bus.map_ciram_enable = (0x2000..0x3EFF).contains(&address);
+    }
+
+    fn ppu_edge(&self, bus: &NesBus) -> bool {
+        let read = bus.ppu_read_enable;
+        let write = bus.ppu_write_enable;
+        let read_edge = read != self.last_read && read;
+        let write_edge = write != self.last_write && write;
+        read_edge | write_edge
     }
 }

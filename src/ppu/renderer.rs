@@ -3,6 +3,7 @@ use super::Scroll;
 pub struct Renderer<'a> {
     framebuffer: &'a mut [[u8; 3]; 256 * 240],
     background_transparent: Box<[bool; 256 * 240]>,
+    sprite_priority: Box<[u8; 256 * 240]>,
     pattern_table: &'a [u8; 8192],
     nametable: &'a [u8; 4096],
 
@@ -39,6 +40,7 @@ impl<'a> Renderer<'a> {
         Self {
             framebuffer,
             background_transparent: Box::new([true; 256 * 240]),
+            sprite_priority: Box::new([0; 256 * 240]),
             pattern_table,
             nametable,
 
@@ -100,28 +102,28 @@ impl<'a> Renderer<'a> {
             let attribute = sprite[2];
             let x = sprite[3] as usize;
 
-            let palette = attribute as usize & 0b11;
+            let palette = (attribute as usize & 0b11) + 4;
             let priority = attribute & 32 == 0;
-            let hflip = attribute & 64 != 0;
-            let vflip = attribute & 128 != 0;
+            let hflip = attribute & 64 == 0;
+            let vflip = attribute & 128 == 0;
 
             if self.wide_sprites {
                 self.render_wide_tile(x, y, tile, palette, priority, hflip, vflip);
             } else {
-                self.render_normal_tile(i == 0, x, y, tile, palette, priority, hflip, vflip);
+                self.render_normal_tile(i as u8, x, y, tile, palette, priority, hflip, vflip);
             }
         }
     }
     fn render_normal_tile(
         &mut self,
-        sprite_zero: bool,
+        sprite_id: u8,
         x: usize,
         y: usize,
         tile: u8,
         palette: usize,
         priority: bool,
-        _hflip: bool,
-        _vflip: bool,
+        hflip: bool,
+        vflip: bool,
     ) {
         for fine_y in 0..8 {
             for fine_x in 0..8 {
@@ -131,20 +133,25 @@ impl<'a> Renderer<'a> {
                     continue;
                 }
 
+                let tile_x = if hflip { 7 - fine_x } else { fine_x };
+                let tile_y = if vflip { fine_y } else { 7 - fine_y };
+
                 let screen_i = screen_x + screen_y * 256;
                 let pattern =
-                    self.pattern(fine_x, fine_y, tile, self.sprites_use_right_field) as usize;
+                    self.pattern(tile_x, tile_y, tile, self.sprites_use_right_field) as usize;
+                if pattern == 0 {
+                    continue;
+                }
                 let transpi = self.background_transparent[screen_i];
-                self.sprite_0_hit |= sprite_zero && !transpi && pattern != 0;
-                let color = if pattern == 0 {
-                    self.background_color
-                } else {
-                    self.palettes[palette][pattern - 1]
-                };
-                let show = transpi || priority;
+                self.sprite_0_hit |= sprite_id == 0 && !transpi;
+                let color = self.palettes[palette][pattern - 1];
+
+                let req_priority = self.sprite_priority[screen_i];
+                let show = (transpi || priority) && sprite_id >= req_priority;
                 if show {
                     let rgb = color_to_rgb(color);
                     self.framebuffer[screen_i] = rgb;
+                    self.sprite_priority[screen_i] = sprite_id;
                 }
             }
         }

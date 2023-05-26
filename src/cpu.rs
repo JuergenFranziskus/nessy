@@ -73,7 +73,7 @@ impl Cpu {
 
         let mut backup = None;
         if !bus.ready() {
-            backup = Some(*self)
+            backup = Some((*self, bus.backup()));
         }
 
         if bus.sync() {
@@ -87,7 +87,9 @@ impl Cpu {
         self.poll_interrupts(bus);
 
         if !bus.ready() && bus.read() {
-            *self = backup.unwrap();
+            let (new_self, bus_backup) = backup.unwrap();
+            *self = new_self;
+            bus.restore(bus_backup);
             bus.set_halted(true);
         }
     }
@@ -294,7 +296,7 @@ impl Cpu {
                 }
 
                 let ignores = self.ignore_operand();
-                if !ignores && !self.page_crossed() {
+                if !ignores {
                     self.read_address(bus);
                 }
                 ignores
@@ -996,8 +998,11 @@ impl Cpu {
         self.state.address |= (byte as u16) << 8;
     }
     fn add_address(&mut self, offset: u8) -> bool {
-        let new_address = self.address().wrapping_add(offset as u16);
-        let carry = (new_address & 0xFF00) != (self.address() & 0xFF00);
+        let low = (self.address() & 0xFF) as u8;
+        let high = (self.address() >> 8) as u8;
+        let (new_low, carry) = low.overflowing_add(offset);
+        let new_high = if !carry { high } else { high.wrapping_add(1) };
+        let new_address = (new_low as u16) | (new_high as u16) << 8;
         self.set_address(new_address);
         carry
     }
@@ -1177,6 +1182,8 @@ impl SignCast for i8 {
 }
 
 pub trait CpuBus {
+    type Backup;
+
     fn address(&self) -> u16;
     fn set_address(&mut self, addr: u16);
 
@@ -1193,4 +1200,7 @@ pub trait CpuBus {
     fn irq(&self) -> bool;
     fn nmi(&self) -> bool;
     fn reset(&self) -> bool;
+
+    fn backup(&self) -> Self::Backup;
+    fn restore(&mut self, backup: Self::Backup);
 }

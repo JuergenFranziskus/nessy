@@ -24,7 +24,7 @@ pub fn decode(byte: u8) -> (Opcode, AddressMode) {
         0x20 => (JSR, Absolute),
         0x60 => (RTS, Implied),
         0x40 => (RTI, Implied),
-        0xBC => (LDY, Absolute),
+        0xBC => (LDY, AbsoluteX),
         _ => {
             let a = byte >> 5;
             let b = (byte >> 2) & 0b111;

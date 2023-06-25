@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 use super::Mapper;
-use crate::{nes::NesBus, rom::Mirroring};
+use crate::{
+    nes::NesBus,
+    rom::{Mirroring, Rom},
+};
 
 /// The NROM mapper, #0 according to INES designation.
 pub struct NRom {
@@ -24,7 +27,11 @@ impl Mapper for NRom {
     }
 }
 impl NRom {
-    pub fn new(prg_rom: Vec<u8>, chr_rom: Vec<u8>, mirror: Mirroring) -> Self {
+    pub fn new(rom: &Rom) -> Self {
+        let prg_rom = rom.prg_rom.clone();
+        let chr_rom = rom.chr_rom.clone();
+        let mirror = rom.header.mirroring;
+
         Self {
             prg_rom,
             chr_rom,

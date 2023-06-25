@@ -167,12 +167,11 @@ fn init_framebuffer(gpu: &GPU, window: &Window) -> Pixely {
 }
 
 fn start_console() -> Nes<impl Mapper> {
-    let rom_src = std::fs::read("roms/MarioBros.nes").unwrap();
-    let rom = Rom::parse(&rom_src);
-    eprintln!("{:#?}", rom.header);
+    let rom_src = std::fs::read("roms/SuperMarioBros.nes").unwrap();
+    let rom = Rom::parse(&rom_src).unwrap();
 
-    assert_eq!(rom.header.mapper(), 0);
-    let mapper = NRom::new(rom.prg_rom, rom.chr_rom, rom.header.mirroring);
+    assert_eq!(rom.header.mapper, 0);
+    let mapper = NRom::new(&rom);
     let nes = Nes::new(mapper);
     nes
 }

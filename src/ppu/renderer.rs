@@ -108,13 +108,13 @@ impl<'a> Renderer<'a> {
             let vflip = attribute & 128 == 0;
 
             if self.wide_sprites {
-                self.render_wide_tile(x, y, tile, palette, priority, hflip, vflip);
+                self.render_wide_sprite(x, y, tile, palette, priority, hflip, vflip);
             } else {
-                self.render_normal_tile(i as u8, x, y, tile, palette, priority, hflip, vflip);
+                self.render_normal_sprite(i as u8, x, y, tile, palette, priority, hflip, vflip);
             }
         }
     }
-    fn render_normal_tile(
+    fn render_normal_sprite(
         &mut self,
         sprite_id: u8,
         x: usize,
@@ -156,7 +156,7 @@ impl<'a> Renderer<'a> {
             }
         }
     }
-    fn render_wide_tile(
+    fn render_wide_sprite(
         &mut self,
         _x: usize,
         _y: usize,

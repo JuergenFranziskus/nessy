@@ -1,7 +1,6 @@
 use crate::nes::NesBus;
 
 pub struct Dma {
-    dma_cycle: u8,
     get_cycle: bool,
     last_m2: bool,
 
@@ -12,7 +11,6 @@ pub struct Dma {
 impl Dma {
     pub fn new() -> Self {
         Dma {
-            dma_cycle: 0,
             get_cycle: true,
             last_m2: false,
             status: Status::Idle,
@@ -21,14 +19,9 @@ impl Dma {
         }
     }
 
-    pub fn master_cycle(&mut self, bus: &mut NesBus) {
+    pub fn master_cycle(&mut self, bus: &mut NesBus, cycle: u64) {
         self.service_cpu(bus);
-        self.cycle(bus);
-        self.tick();
-    }
-    fn tick(&mut self) {
-        self.dma_cycle += 1;
-        self.dma_cycle %= 12;
+        self.cycle(bus, cycle);
     }
 
     fn service_cpu(&mut self, bus: &mut NesBus) {
@@ -48,8 +41,8 @@ impl Dma {
         self.status = Status::Begin;
     }
 
-    fn cycle(&mut self, bus: &mut NesBus) {
-        if !self.should_cycle() {
+    fn cycle(&mut self, bus: &mut NesBus, cycle: u64) {
+        if !Self::should_cycle(cycle) {
             return;
         }
 
@@ -99,8 +92,9 @@ impl Dma {
         let low = self.address_low as u16;
         low | high
     }
-    fn should_cycle(&self) -> bool {
-        self.dma_cycle == 0
+
+    fn should_cycle(cycle: u64) -> bool {
+        cycle % 12 == 0
     }
 }
 

@@ -17,7 +17,7 @@ pub struct NRom {
 }
 
 impl Mapper for NRom {
-    fn master_cycle(&mut self, bus: &mut NesBus) {
+    fn master_cycle(&mut self, bus: &mut NesBus, _cycle: u64) {
         self.service_cpu(bus);
         self.service_ppu(bus);
 

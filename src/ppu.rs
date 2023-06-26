@@ -1,18 +1,13 @@
 use crate::nes::NesBus;
 
-use self::renderer::{color_to_rgb, Renderer};
-
 const CYCLES_PER_LINE: u32 = 341;
 const LINES_PER_FRAME: u32 = 262;
 const CYCLES_PER_FRAME: u32 = CYCLES_PER_LINE * LINES_PER_FRAME;
 const NMI_START: u32 = 82182;
 const NMI_END: u32 = 89002;
 
-pub mod renderer;
-
 #[allow(dead_code)]
 pub struct Ppu {
-    master_cycle: u8,
     last_m2: bool,
 
     control: Control,
@@ -32,15 +27,11 @@ pub struct Ppu {
     odd_frame: bool,
 
     scheduled_mem_op: Option<MemOp>,
-
-    fetch: Fetch,
-    graphics: Graphics,
     framebuffer: Box<[[u8; 3]; 256 * 240]>,
 }
 impl Ppu {
     pub fn new() -> Self {
         Self {
-            master_cycle: 0,
             last_m2: false,
 
             control: Control::init(),
@@ -60,28 +51,20 @@ impl Ppu {
             odd_frame: false,
 
             scheduled_mem_op: None,
-
-            fetch: Fetch::init(),
-            graphics: Graphics::init(),
             framebuffer: Box::new([[0; 3]; 256 * 240]),
         }
     }
 
-    pub fn master_cycle(&mut self, bus: &mut NesBus) {
-        if self.should_cycle_ppu() {
+    pub fn master_cycle(&mut self, bus: &mut NesBus, cycle: u64) {
+        if self.should_cycle_ppu(cycle) {
             self.ppu_cycle(bus);
         }
 
         self.service_cpu(bus);
-        self.tick_counter();
         self.last_m2 = bus.cpu_m2;
     }
-    fn should_cycle_ppu(&self) -> bool {
-        self.master_cycle == 0
-    }
-    fn tick_counter(&mut self) {
-        self.master_cycle += 1;
-        self.master_cycle %= 4;
+    fn should_cycle_ppu(&self, cycle: u64) -> bool {
+        cycle % 4 == 0
     }
 
     fn ppu_cycle(&mut self, bus: &mut NesBus) {
@@ -91,8 +74,6 @@ impl Ppu {
         self.decide_nmi(bus);
         self.perform_mem_op(bus);
         self.update_ppudata_latch(bus);
-        self.fetch_graphics(bus);
-        self.render();
         self.tick_pixel();
     }
     fn service_cpu(&mut self, bus: &mut NesBus) {
@@ -269,127 +250,6 @@ impl Ppu {
         self.ppudata_address %= 0x4000;
     }
 
-    fn fetch_graphics(&mut self, bus: &mut NesBus) {
-        if self.mask.render_disabled() {
-            return;
-        }
-
-        let scanline = self.render_cycle / CYCLES_PER_LINE;
-        let line_cycle = self.render_cycle % CYCLES_PER_LINE;
-
-        if scanline == LINES_PER_FRAME - 1 && line_cycle == 0 {
-            self.fetch.start_fetch();
-        }
-
-        if !self.fetch.fetching {
-            return;
-        }
-
-        match self.fetch.awaiting {
-            Awaiting::None => (),
-            Awaiting::Name => {
-                self.graphics.nametable[self.fetch.nametable as usize] = bus.ppu_data;
-                self.fetch.nametable += 1;
-            }
-            Awaiting::Pattern => {
-                self.graphics.pattern_table[self.fetch.pattern_table as usize] = bus.ppu_data;
-                self.fetch.pattern_table += 1;
-            }
-        }
-        self.fetch.awaiting = Awaiting::None;
-
-        match line_cycle {
-            0 => (),
-            1..=256 => {
-                let name_done = self.fetch.nametable >= 4096;
-                let pattern_done = self.fetch.pattern_table >= 8192;
-
-                if pattern_done && name_done {
-                    self.fetch.fetching = false;
-                    return;
-                }
-
-                let turn = match self.fetch.cycle % 4 {
-                    0 | 1 if !name_done => Awaiting::Name,
-                    0 | 1 => Awaiting::Pattern,
-                    2 | 3 if !pattern_done => Awaiting::Pattern,
-                    2 | 3 => unreachable!(),
-                    _ => unreachable!(),
-                };
-                let step = self.fetch.cycle % 2;
-
-                let address = match turn {
-                    Awaiting::None => {
-                        dbg!(name_done, pattern_done);
-                        panic!()
-                    }
-                    Awaiting::Name => self.fetch.nametable + 0x2000,
-                    Awaiting::Pattern => self.fetch.pattern_table,
-                };
-
-                match step {
-                    0 => self.schedule_read(address),
-                    1 => self.fetch.awaiting = turn,
-                    _ => unreachable!(),
-                }
-
-                self.fetch.cycle += 1;
-            }
-            337 => self.schedule_read(0x2000),
-            338 => (),
-            339 => self.schedule_read(0x2000),
-            _ => (),
-        }
-    }
-    fn render(&mut self) {
-        if self.render_cycle != NMI_START {
-            return;
-        }
-        let background = self.background();
-        if self.mask.render_disabled() {
-            let color = color_to_rgb(background);
-            for pixel in &mut *self.framebuffer {
-                *pixel = color;
-            }
-            self.status.sprite_zero_hit = false;
-            return;
-        }
-
-        let palette = self.prepare_palette();
-        let renderer = Renderer::new(
-            &mut self.framebuffer,
-            &self.graphics.pattern_table,
-            &self.graphics.nametable,
-            &self.oam_memory,
-            self.control.sprite_pattern_table,
-            self.control.wide_sprites,
-            self.control.background_pattern_table,
-            background,
-            palette,
-            self.scroll,
-        );
-        let (hit, overflow) = renderer.render();
-        self.status.sprite_zero_hit = hit;
-        self.status.sprite_overflow = overflow;
-    }
-
-    fn background(&self) -> u8 {
-        self.palette_memory[0]
-    }
-    fn prepare_palette(&self) -> [[u8; 3]; 8] {
-        let mem = &self.palette_memory;
-        [
-            [mem[1], mem[2], mem[3]],
-            [mem[5], mem[6], mem[7]],
-            [mem[9], mem[10], mem[11]],
-            [mem[13], mem[14], mem[15]],
-            [mem[17], mem[18], mem[19]],
-            [mem[21], mem[22], mem[23]],
-            [mem[25], mem[26], mem[27]],
-            [mem[29], mem[30], mem[31]],
-        ]
-    }
-
     pub fn framebuffer(&self) -> &[[u8; 3]; 256 * 240] {
         &self.framebuffer
     }
@@ -519,50 +379,5 @@ impl Scroll {
     pub fn write_high(&mut self, x: bool, y: bool) {
         self.x.1 = x;
         self.y.1 = y;
-    }
-}
-
-struct Fetch {
-    fetching: bool,
-    awaiting: Awaiting,
-    cycle: u16,
-    nametable: u16,
-    pattern_table: u16,
-}
-impl Fetch {
-    fn init() -> Self {
-        Self {
-            awaiting: Awaiting::None,
-            fetching: false,
-            cycle: 0,
-            nametable: 0,
-            pattern_table: 0,
-        }
-    }
-
-    fn start_fetch(&mut self) {
-        self.cycle = 0;
-        self.fetching = true;
-        self.nametable = 0;
-        self.pattern_table = 0;
-    }
-}
-
-enum Awaiting {
-    None,
-    Name,
-    Pattern,
-}
-
-struct Graphics {
-    nametable: Box<[u8; 4096]>,
-    pattern_table: Box<[u8; 8192]>,
-}
-impl Graphics {
-    fn init() -> Self {
-        Self {
-            nametable: Box::new([0; 4096]),
-            pattern_table: Box::new([0; 8192]),
-        }
     }
 }

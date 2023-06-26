@@ -78,10 +78,10 @@ impl<M: Mapper> Nes<M> {
             self.cpu.cycle(&mut self.bus);
         }
 
-        self.ppu.master_cycle(&mut self.bus);
-        self.mapper.master_cycle(&mut self.bus);
+        self.ppu.master_cycle(&mut self.bus, self.cycle);
+        self.mapper.master_cycle(&mut self.bus, self.cycle);
         self.joystick.master_cycle(&mut self.bus);
-        self.dma.master_cycle(&mut self.bus);
+        self.dma.master_cycle(&mut self.bus, self.cycle);
     }
 
     fn cpu_should_cycle(&self) -> bool {

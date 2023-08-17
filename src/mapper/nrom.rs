@@ -1,50 +1,44 @@
 use super::Mapper;
-use crate::{cpu::CpuPins, rom::Rom};
+use crate::{nesbus::CpuBus, rom::Rom};
 
 pub struct NRom {
     prg: Vec<u8>,
-    mirror_prg: bool,
+    _chr: Vec<u8>,
+    large_prg: bool,
 }
 impl NRom {
     pub fn new(rom: &Rom) -> Self {
+        let large_prg = rom.prg_rom.len() > 0x4000;
         Self {
             prg: rom.prg_rom.to_vec(),
-            mirror_prg: rom.prg_rom.len() >= 16384,
+            _chr: rom.chr_rom.to_vec(),
+            large_prg,
         }
     }
 
-    fn handle_cpu(&self, cpu: &mut CpuPins) {
-        let address = cpu.address() as usize;
-        if address < 0x8000 {
+    fn handle_cpu(&mut self, cpu: &mut CpuBus) {
+        let addr = cpu.address() as usize;
+        if addr < 0x8000 {
             return;
         };
-        let address = address - 0x8000;
-        let address = if self.mirror_prg {
-            address % 16384
-        } else {
-            address
-        };
+        let addr = addr % 0x8000;
+        let addr = if self.large_prg { addr } else { addr % 0x4000 };
 
         if cpu.read() {
-            cpu.set_data(self.prg[address]);
+            cpu.set_data(self.prg[addr]);
         }
     }
 
-    pub fn overwrite(&mut self, address: usize, value: u8) {
-        if address < 0x8000 {
+    pub fn overwrite(&mut self, addr: u16, value: u8) {
+        if addr < 0x8000 {
             return;
         };
-        let address = if self.mirror_prg {
-            address % 16384
-        } else {
-            address
-        };
-
-        self.prg[address] = value;
+        let addr = addr % if self.large_prg { 0x8000 } else { 0x4000 };
+        self.prg[addr as usize] = value;
     }
 }
 impl Mapper for NRom {
-    fn cycle(&mut self, cpu: &mut crate::cpu::CpuPins) {
+    fn cycle(&mut self, cpu: &mut CpuBus) {
         self.handle_cpu(cpu);
     }
 }

@@ -1,7 +1,7 @@
-use crate::cpu::CpuPins;
+use crate::nesbus::CpuBus;
 
 pub mod nrom;
 
 pub trait Mapper {
-    fn cycle(&mut self, cpu: &mut CpuPins);
+    fn cycle(&mut self, cpu: &mut CpuBus);
 }

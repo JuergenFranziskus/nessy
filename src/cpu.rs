@@ -1,40 +1,720 @@
-use self::instruction::{decode, AddressMode, Opcode};
+use self::instruction::{decode, AddrMode, Op};
+use std::u8;
 
-mod instruction;
+pub mod instruction;
 
-#[derive(Copy, Clone, Debug)]
-pub struct Cpu {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Cpu6502 {
+    pins: CpuPins,
+    meta: Meta,
+
     a: u8,
     x: u8,
     y: u8,
     sp: u8,
     pc: u16,
-    flags: Flags,
+    status: Status,
 
-    last_nmi: bool,
-    nmi_pending: bool,
-    irq_pending: bool,
+    interrupts: Interrupts,
+    break_mode: BreakMode,
 
-    state: State,
+    op: Op,
+    addr_mode: AddrMode,
 }
-impl Cpu {
-    pub fn new() -> Self {
-        let cpu = Self {
+impl Cpu6502 {
+    pub fn init() -> Self {
+        Self {
+            pins: CpuPins::init(),
+            meta: Meta::init(),
+
             a: 0,
             x: 0,
             y: 0,
             sp: 0,
             pc: 0,
+            status: Status::init(),
+            interrupts: Interrupts::init(),
+            break_mode: BreakMode::Reset,
+            op: Op::BRK,
+            addr_mode: AddrMode::Implied,
+        }
+    }
 
-            last_nmi: false,
-            nmi_pending: false,
-            irq_pending: false,
+    pub fn exec(&mut self, bus: &mut impl Bus6502) {
+        if self.meta.jammed() {
+            self.be_jammed(bus);
+            return;
+        }
 
-            flags: Flags::init(),
-            state: State::init(),
+        self.fetch(bus);
+        let (addr, val) = self.eval_addr_mode(bus);
+        self.execute_op(addr, val, bus);
+    }
+    fn be_jammed(&mut self, bus: &mut impl Bus6502) {
+        if self.pins.rst() {
+            self.interrupts = Interrupts::init();
+            self.meta.set_jammed(false);
+        }
+
+        self.advance_cycle(false, bus);
+    }
+    fn fetch(&mut self, bus: &mut impl Bus6502) {
+        if self.interrupts.reset() {
+            self.break_mode = BreakMode::Reset;
+            self.interrupts.clear();
+        } else if self.interrupts.nmi() {
+            self.break_mode = BreakMode::Nmi;
+            self.interrupts.clear_nmi();
+        } else if self.interrupts.irq() {
+            self.break_mode = BreakMode::Irq;
+        } else {
+            self.break_mode = BreakMode::Break;
+        }
+
+        self.config_read(self.pc);
+        self.pins.set_sync(true);
+        self.cycle(bus);
+        self.pins.set_sync(false);
+
+        if self.break_mode != BreakMode::Break {
+            self.op = Op::BRK;
+            self.addr_mode = AddrMode::Implied;
+        } else {
+            self.pc += 1;
+            (self.op, self.addr_mode) = decode(self.pins.data());
+        }
+    }
+
+    fn eval_addr_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        match self.addr_mode {
+            AddrMode::Implied => self.exec_implied_mode(bus),
+            AddrMode::Accumulator => self.exec_accumulator_mode(bus),
+            AddrMode::Immediate => self.exec_immediate_mode(bus),
+            AddrMode::Relative => self.exec_relative_mode(bus),
+            AddrMode::Zero => self.exec_zero_mode(bus),
+            AddrMode::ZeroX => self.exec_zero_index_mode(self.x, bus),
+            AddrMode::ZeroY => self.exec_zero_index_mode(self.y, bus),
+            AddrMode::Absolute => self.exec_absolute_mode(bus),
+            AddrMode::AbsoluteX => self.exec_absolute_index_mode(self.x, bus),
+            AddrMode::AbsoluteY => self.exec_absolute_index_mode(self.y, bus),
+            AddrMode::Indirect => self.exec_indirect_mode(bus),
+            AddrMode::XIndirect => self.exec_xindirect_mode(bus),
+            AddrMode::IndirectY => self.exec_indirect_y_mode(bus),
+        }
+    }
+    fn exec_implied_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        self.read(self.pc, bus);
+        (0, 0)
+    }
+    fn exec_accumulator_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        self.read(self.pc, bus);
+        (0, self.a)
+    }
+    fn exec_immediate_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        let val = self.read_pc_byte(bus);
+        (0, val)
+    }
+    fn exec_relative_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        let val = self.read_pc_byte(bus);
+        (0, val)
+    }
+    fn exec_zero_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        let addr = self.read_pc_byte(bus) as u16;
+
+        let val = if self.op.reads_operand() {
+            self.read(addr, bus)
+        } else {
+            0
         };
 
-        cpu
+        if self.op.is_rmw() {
+            self.write(addr, val, bus);
+        }
+
+        (addr, val)
+    }
+    fn exec_zero_index_mode(&mut self, index: u8, bus: &mut impl Bus6502) -> (u16, u8) {
+        let addr = self.read_pc_byte(bus);
+        let _ = self.read(addr as u16, bus);
+        let addr = addr.wrapping_add(index) as u16;
+
+        let val = if self.op.reads_operand() {
+            self.read(addr, bus)
+        } else {
+            0
+        };
+        if self.op.is_rmw() {
+            self.write(addr, val, bus);
+        }
+
+        (addr, val)
+    }
+    fn exec_absolute_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        let low = self.read_pc_byte(bus) as u16;
+        let high = self.read_pc_byte(bus) as u16;
+        let addr = low | high << 8;
+        let val = if self.op.reads_operand() {
+            self.read(addr, bus)
+        } else {
+            0
+        };
+        if self.op.is_rmw() {
+            self.write(addr, val, bus);
+        }
+
+        (addr, val)
+    }
+    fn exec_absolute_index_mode(&mut self, index: u8, bus: &mut impl Bus6502) -> (u16, u8) {
+        let low = self.read_pc_byte(bus);
+        let high = self.read_pc_byte(bus);
+        let (low, carry) = low.overflowing_add(index);
+        let wrong_address = (low as u16) | (high as u16) << 8;
+        let high = if carry { high.wrapping_add(1) } else { high };
+        let wrong_value = self.read(wrong_address, bus);
+
+        let addr = (low as u16) | (high as u16) << 8;
+
+        let read = self.op.reads_operand();
+        let write = self.op.writes_operand();
+        let rmw = self.op.is_rmw();
+
+        if rmw {
+            let val = self.read(addr, bus);
+            self.write(addr, val, bus);
+            (addr, val)
+        } else if read {
+            if !carry {
+                return (addr, wrong_value);
+            };
+            let val = self.read(addr, bus);
+            (addr, val)
+        } else if write {
+            (addr, wrong_value)
+        } else {
+            unreachable!()
+        }
+    }
+    fn exec_indirect_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        let low = self.read_pc_byte(bus);
+        let high = self.read_pc_byte(bus);
+        let low_inc = low.wrapping_add(1);
+
+        let addr_low = self.read((low as u16) | (high as u16) << 8, bus);
+        let addr_high = self.read((low_inc as u16) | (high as u16) << 8, bus);
+
+        let addr = (addr_low as u16) | (addr_high as u16) << 8;
+        (addr, 0)
+    }
+    fn exec_xindirect_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        let offset = self.read_pc_byte(bus);
+        self.read(offset as u16, bus);
+
+        let ptr = offset.wrapping_add(self.x);
+        let low = self.read(ptr as u16, bus);
+        let high = self.read(ptr.wrapping_add(1) as u16, bus);
+        let addr = (low as u16) | (high as u16) << 8;
+
+        let val = if self.op.reads_operand() {
+            self.read(addr, bus)
+        } else {
+            0
+        };
+        if self.op.is_rmw() {
+            self.write(addr, val, bus);
+        }
+
+        (addr, val)
+    }
+    fn exec_indirect_y_mode(&mut self, bus: &mut impl Bus6502) -> (u16, u8) {
+        let zero_ptr = self.read_pc_byte(bus);
+        let low = self.read(zero_ptr as u16, bus);
+        let high = self.read(zero_ptr.wrapping_add(1) as u16, bus);
+        let (low, carry) = low.overflowing_add(self.y);
+        let wrong_addr = (low as u16) | (high as u16) << 8;
+        let high = if carry { high.wrapping_add(1) } else { high };
+        let addr = (low as u16) | (high as u16) << 8;
+        let wrong_val = self.read(wrong_addr, bus);
+
+        let read = self.op.reads_operand();
+        let write = self.op.writes_operand();
+        let rmw = self.op.is_rmw();
+
+        if rmw {
+            let val = self.read(addr, bus);
+            self.write(addr, val, bus);
+            (addr, val)
+        } else if read {
+            if !carry {
+                return (addr, wrong_val);
+            };
+            let val = self.read(addr, bus);
+            (addr, val)
+        } else if write {
+            (addr, wrong_val)
+        } else {
+            unreachable!()
+        }
+    }
+
+    fn execute_op(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        use Op::*;
+        match self.op {
+            ADC => self.exec_adc(val),
+            AND => self.exec_and(val),
+            ASL => self.exec_asl(addr, val, bus),
+            BCC => self.exec_branch(!self.status.carry(), val, bus),
+            BCS => self.exec_branch(self.status.carry(), val, bus),
+            BEQ => self.exec_branch(self.status.zero(), val, bus),
+            BIT => self.exec_bit(val),
+            BMI => self.exec_branch(self.status.negative(), val, bus),
+            BNE => self.exec_branch(!self.status.zero(), val, bus),
+            BPL => self.exec_branch(!self.status.negative(), val, bus),
+            BRK => self.exec_brk(bus),
+            BVC => self.exec_branch(!self.status.overflow(), val, bus),
+            BVS => self.exec_branch(self.status.overflow(), val, bus),
+            CLC => self.status.set_carry(false),
+            CLD => self.status.set_decimal(false),
+            CLV => self.status.set_overflow(false),
+            CMP => self.exec_cmp(self.a, val),
+            CPX => self.exec_cmp(self.x, val),
+            CPY => self.exec_cmp(self.y, val),
+            DEC => self.exec_dec(addr, val, bus),
+            DEX => self.exec_dex(),
+            DEY => self.exec_dey(),
+            EOR => self.exec_eor(val),
+            INC => self.exec_inc(addr, val, bus),
+            INX => self.exec_inx(),
+            INY => self.exec_iny(),
+            JAM => self.exec_jam(),
+            JMP => self.pc = addr,
+            JSR => self.exec_jsr(addr, bus),
+            LDA => self.exec_lda(val),
+            LDX => self.exec_ldx(val),
+            LDY => self.exec_ldy(val),
+            LSR => self.exec_lsr(addr, val, bus),
+            NOP => (),
+            ORA => self.exec_ora(val),
+            PHA => self.exec_pha(bus),
+            PHP => self.exec_php(bus),
+            PLA => self.exec_pla(bus),
+            PLP => self.exec_plp(bus),
+            ROL => self.exec_rol(addr, val, bus),
+            ROR => self.exec_ror(addr, val, bus),
+            RTI => self.exec_rti(bus),
+            RTS => self.exec_rts(bus),
+            SBC => self.exec_sbc(val),
+            SEC => self.status.set_carry(true),
+            SED => self.status.set_decimal(true),
+            SEI => self.status.set_irq_disable(true),
+            STA => self.exec_sta(addr, bus),
+            STX => self.exec_stx(addr, bus),
+            STY => self.exec_sty(addr, bus),
+            TXS => self.sp = self.x,
+            TAX => self.exec_tax(),
+            TAY => self.exec_tay(),
+            TSX => self.exec_tsx(),
+            TXA => self.exec_txa(),
+            TYA => self.exec_tya(),
+
+            DCP => self.exec_dcp(addr, val, bus),
+            ISC => self.exec_isc(addr, val, bus),
+            LAX => self.exec_lax(val),
+            SAX => self.exec_sax(addr, bus),
+            RLA => self.exec_rla(addr, val, bus),
+            RRA => self.exec_rra(addr, val, bus),
+            SLO => self.exec_slo(addr, val, bus),
+            SRE => self.exec_sre(addr, val, bus),
+            op => todo!("Operation {op:?} is not implemented"),
+        }
+    }
+    fn exec_adc(&mut self, val: u8) {
+        self.do_adc(val);
+    }
+    fn exec_and(&mut self, val: u8) {
+        self.a &= val;
+        self.set_common_flags(self.a);
+    }
+    fn exec_asl(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        self.status.set_carry(val & 128 != 0);
+        let res = val << 1;
+        self.set_common_flags(res);
+        self.write_rmw_result(addr, res, bus);
+    }
+    fn exec_bit(&mut self, val: u8) {
+        let negative = val & 128 != 0;
+        let overflow = val & 64 != 0;
+        self.status.set_negative(negative);
+        self.status.set_overflow(overflow);
+        self.status.set_zero(self.a & val == 0)
+    }
+    fn exec_branch(&mut self, c: bool, val: u8, bus: &mut impl Bus6502) {
+        if !c {
+            return;
+        };
+
+        self.read(self.pc, bus);
+        let (low, carry) = self.pcl().overflowing_add_signed(val as i8);
+        self.pc = u16::from_le_bytes([low, self.pch()]);
+        if !carry {
+            return;
+        };
+
+        self.read(self.pc, bus);
+        let pch = self.pch().wrapping_add(1);
+        self.pc = u16::from_le_bytes([low, pch]);
+    }
+    fn exec_brk(&mut self, bus: &mut impl Bus6502) {
+        if self.break_mode.increment_pc() {
+            self.pc = self.pc.wrapping_add(1);
+        }
+
+        let suppress_writes = self.break_mode.suppress_writes();
+        self.push_in_brk(suppress_writes, self.pch(), bus);
+        self.push_in_brk(suppress_writes, self.pcl(), bus);
+        let b_flag = self.break_mode.set_brk_flag();
+        self.push_in_brk(suppress_writes, self.status.to_pushable_bits(b_flag), bus);
+        self.status.set_irq_disable(true);
+
+        let vector = self.break_mode.vector();
+        let low = self.read(vector, bus);
+        let high = self.read(vector + 1, bus);
+        self.pc = (low as u16) | (high as u16) << 8;
+    }
+    fn exec_cmp(&mut self, a: u8, b: u8) {
+        let (res, carry) = a.overflowing_sub(b);
+        self.status.set_carry(!carry);
+        self.set_common_flags(res);
+    }
+    fn exec_dec(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        let val = val.wrapping_sub(1);
+        self.set_common_flags(val);
+        self.write_rmw_result(addr, val, bus);
+    }
+    fn exec_dex(&mut self) {
+        self.x = self.x.wrapping_sub(1);
+        self.set_common_flags(self.x);
+    }
+    fn exec_dey(&mut self) {
+        self.y = self.y.wrapping_sub(1);
+        self.set_common_flags(self.y);
+    }
+    fn exec_eor(&mut self, val: u8) {
+        self.a ^= val;
+        self.set_common_flags(self.a);
+    }
+    fn exec_inc(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        let val = val.wrapping_add(1);
+        self.set_common_flags(val);
+        self.write_rmw_result(addr, val, bus);
+    }
+    fn exec_inx(&mut self) {
+        self.x = self.x.wrapping_add(1);
+        self.set_common_flags(self.x)
+    }
+    fn exec_iny(&mut self) {
+        self.y = self.y.wrapping_add(1);
+        self.set_common_flags(self.y)
+    }
+    fn exec_jam(&mut self) {
+        self.meta.set_jammed(true);
+        self.config_read(self.pc);
+    }
+    fn exec_jsr(&mut self, addr: u16, bus: &mut impl Bus6502) {
+        self.read(self.sp as u16 + 0x100, bus);
+        let pc = self.pc.wrapping_sub(1);
+        let pcl = pc as u8;
+        let pch = (pc >> 8) as u8;
+        self.push(pch, bus);
+        self.push(pcl, bus);
+        self.pc = addr;
+    }
+    fn exec_lda(&mut self, val: u8) {
+        self.a = val;
+        self.set_common_flags(val);
+    }
+    fn exec_ldx(&mut self, val: u8) {
+        self.x = val;
+        self.set_common_flags(val);
+    }
+    fn exec_ldy(&mut self, val: u8) {
+        self.y = val;
+        self.set_common_flags(val);
+    }
+    fn exec_lsr(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        self.status.set_carry(val & 1 != 0);
+        let res = val >> 1;
+        self.set_common_flags(res);
+        self.write_rmw_result(addr, res, bus);
+    }
+    fn exec_ora(&mut self, val: u8) {
+        self.a |= val;
+        self.set_common_flags(self.a);
+    }
+    fn exec_pha(&mut self, bus: &mut impl Bus6502) {
+        self.push(self.a, bus);
+    }
+    fn exec_php(&mut self, bus: &mut impl Bus6502) {
+        let bits = self.status.to_pushable_bits(true);
+        self.push(bits, bus);
+    }
+    fn exec_pla(&mut self, bus: &mut impl Bus6502) {
+        self.read(self.sp as u16 + 0x100, bus);
+        self.sp = self.sp.wrapping_add(1);
+
+        self.a = self.read(self.sp as u16 + 0x100, bus);
+        self.set_common_flags(self.a);
+    }
+    fn exec_plp(&mut self, bus: &mut impl Bus6502) {
+        self.read(self.sp as u16 + 0x100, bus);
+        self.sp = self.sp.wrapping_add(1);
+
+        let bits = self.read(self.sp as u16 + 0x100, bus);
+        self.status = Status::from_pushable_bits(bits);
+    }
+    fn exec_rol(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        let new_carry = val & 128 != 0;
+        let old_carry = if self.status.carry() { 1 } else { 0 };
+        let res = (val << 1) | old_carry;
+
+        self.status.set_carry(new_carry);
+        self.set_common_flags(res);
+        self.write_rmw_result(addr, res, bus);
+    }
+    fn exec_ror(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        let new_carry = val & 1 != 0;
+        let old_carry = if self.status.carry() { 128 } else { 0 };
+        let res = (val >> 1) | old_carry;
+
+        self.status.set_carry(new_carry);
+        self.set_common_flags(res);
+        self.write_rmw_result(addr, res, bus);
+    }
+    fn exec_rti(&mut self, bus: &mut impl Bus6502) {
+        self.read(self.sp as u16 + 0x100, bus);
+        self.sp = self.sp.wrapping_add(1);
+
+        self.status = Status::from_pushable_bits(self.read(self.sp as u16 + 0x100, bus));
+        self.sp = self.sp.wrapping_add(1);
+        let pcl = self.read(self.sp as u16 + 0x100, bus);
+        self.sp = self.sp.wrapping_add(1);
+        let pch = self.read(self.sp as u16 + 0x100, bus);
+
+        self.pc = (pcl as u16) | (pch as u16) << 8;
+    }
+    fn exec_rts(&mut self, bus: &mut impl Bus6502) {
+        self.read(self.sp as u16 + 0x100, bus);
+        self.sp = self.sp.wrapping_add(1);
+
+        let pcl = self.read(self.sp as u16 + 0x100, bus);
+        self.sp = self.sp.wrapping_add(1);
+        let pch = self.read(self.sp as u16 + 0x100, bus);
+
+        self.pc = (pcl as u16) | (pch as u16) << 8;
+        self.read(self.pc, bus);
+        self.pc = self.pc.wrapping_add(1);
+    }
+    fn exec_sbc(&mut self, val: u8) {
+        self.do_sbc(val)
+    }
+    fn exec_sta(&mut self, addr: u16, bus: &mut impl Bus6502) {
+        self.write(addr, self.a, bus);
+    }
+    fn exec_stx(&mut self, addr: u16, bus: &mut impl Bus6502) {
+        self.write(addr, self.x, bus);
+    }
+    fn exec_sty(&mut self, addr: u16, bus: &mut impl Bus6502) {
+        self.write(addr, self.y, bus);
+    }
+    fn exec_tax(&mut self) {
+        self.x = self.a;
+        self.set_common_flags(self.x);
+    }
+    fn exec_tay(&mut self) {
+        self.y = self.a;
+        self.set_common_flags(self.y);
+    }
+    fn exec_tsx(&mut self) {
+        self.x = self.sp;
+        self.set_common_flags(self.x);
+    }
+    fn exec_txa(&mut self) {
+        self.a = self.x;
+        self.set_common_flags(self.a);
+    }
+    fn exec_tya(&mut self) {
+        self.a = self.y;
+        self.set_common_flags(self.a);
+    }
+
+    fn exec_dcp(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        let r = val.wrapping_sub(1);
+
+        let (cmp_r, carry) = self.a.overflowing_sub(r);
+        self.status.set_carry(!carry);
+        self.set_common_flags(cmp_r);
+        self.write_rmw_result(addr, r, bus);
+    }
+    fn exec_isc(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        let val = val.wrapping_add(1);
+        self.do_sbc(val);
+        self.write_rmw_result(addr, val, bus);
+    }
+    fn exec_lax(&mut self, val: u8) {
+        self.a = val;
+        self.x = val;
+        self.set_common_flags(val);
+    }
+    fn exec_sax(&mut self, addr: u16, bus: &mut impl Bus6502) {
+        let val = self.a & self.x;
+        self.write(addr, val, bus);
+    }
+    fn exec_rla(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        let val_low = if self.status.carry() { 1 } else { 0 };
+        self.status.set_carry(val & 128 != 0);
+        let val = (val << 1) | val_low;
+
+        self.a &= val;
+        self.set_common_flags(self.a);
+        self.write_rmw_result(addr, val, bus);
+    }
+    fn exec_rra(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        let val_low = if self.status.carry() { 128 } else { 0 };
+        self.status.set_carry(val & 1 != 0);
+        let val = (val >> 1) | val_low;
+
+        self.do_adc(val);
+        self.write_rmw_result(addr, val, bus);
+    }
+    fn exec_slo(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        self.status.set_carry(val & 128 != 0);
+        let val = val << 1;
+        self.a |= val;
+        self.set_common_flags(self.a);
+        self.write_rmw_result(addr, val, bus);
+    }
+    fn exec_sre(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        self.status.set_carry(val & 1 != 0);
+        let val = val >> 1;
+
+        self.a ^= val;
+        self.set_common_flags(self.a);
+        self.write_rmw_result(addr, val, bus);
+    }
+
+    fn do_adc(&mut self, val: u8) {
+        let (res, carry) = self.a.carrying_add(val, self.status.carry());
+
+        let (_, overflow) = (self.a as i8).overflowing_add(val as i8);
+
+        self.a = res;
+        self.set_common_flags(self.a);
+        self.status.set_carry(carry);
+        self.status.set_overflow(overflow);
+    }
+    fn do_sbc(&mut self, val: u8) {
+        let (res, borrow) = self.a.borrowing_sub(val, !self.status.carry());
+
+        let (_, overflow) = (self.a as i8).borrowing_sub(val as i8, !self.status.carry());
+
+        self.status.set_overflow(overflow);
+        self.status.set_carry(!borrow);
+        self.set_common_flags(res);
+        self.a = res;
+    }
+
+    fn write_rmw_result(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        match self.addr_mode {
+            AddrMode::Accumulator => self.a = val,
+            _ => self.write(addr, val, bus),
+        }
+    }
+
+    fn config_read_pc_byte(&mut self) {
+        self.config_read(self.pc);
+        self.pc += 1;
+    }
+    fn read_pc_byte(&mut self, bus: &mut impl Bus6502) -> u8 {
+        self.config_read_pc_byte();
+        self.cycle(bus);
+        self.pins.data()
+    }
+
+    fn config_read(&mut self, address: u16) {
+        self.pins.set_address(address);
+        self.pins.set_read(true);
+    }
+    fn config_write(&mut self, address: u16, data: u8) {
+        self.pins.set_address(address);
+        self.pins.set_data(data);
+        self.pins.set_read(false);
+    }
+    fn config_push(&mut self, suppress: bool, data: u8) {
+        self.pins.set_address(self.sp as u16 + 0x100);
+        self.pins.set_data(data);
+        self.sp = self.sp.wrapping_sub(1);
+        self.pins.set_read(suppress);
+    }
+    fn push_in_brk(&mut self, suppress: bool, data: u8, bus: &mut impl Bus6502) {
+        self.config_push(suppress, data);
+        self.cycle(bus);
+    }
+    fn push(&mut self, data: u8, bus: &mut impl Bus6502) {
+        self.push_in_brk(false, data, bus);
+    }
+
+    fn read(&mut self, address: u16, bus: &mut impl Bus6502) -> u8 {
+        self.config_read(address);
+        self.cycle(bus);
+        self.pins.data()
+    }
+    fn write(&mut self, addr: u16, val: u8, bus: &mut impl Bus6502) {
+        self.config_write(addr, val);
+        self.cycle(bus);
+    }
+
+    fn set_common_flags(&mut self, val: u8) {
+        self.status.set_zero(val == 0);
+        self.status.set_negative(val >= 128);
+    }
+
+    fn pch(&self) -> u8 {
+        (self.pc >> 8) as u8
+    }
+    fn pcl(&self) -> u8 {
+        self.pc as u8
+    }
+
+    fn cycle(&mut self, bus: &mut impl Bus6502) {
+        self.advance_cycle(true, bus);
+    }
+    fn advance_cycle(&mut self, poll: bool, bus: &mut impl Bus6502) {
+        loop {
+            if poll {
+                self.poll_interrupts();
+            }
+            self.update_meta_latches();
+            bus.cycle(self);
+
+            let write = !self.pins.read();
+            let ready = !self.pins.not_ready();
+            // The 6502 cannot halt on a write cycle
+            if write || ready {
+                break;
+            }
+            self.pins.set_halt(true);
+        }
+
+        self.pins.set_halt(false);
+    }
+    fn poll_interrupts(&mut self) {
+        self.interrupts.set_irq(self.pins.irq());
+        self.interrupts
+            .or_nmi(self.pins.nmi() && !self.meta.last_nmi());
+        self.interrupts.or_reset(self.pins.rst());
+    }
+    fn update_meta_latches(&mut self) {
+        self.meta.set_last_nmi(self.pins.nmi());
+        self.meta.set_last_rst(self.pins.rst());
     }
 
     pub fn a(&self) -> u8 {
@@ -52,1155 +732,331 @@ impl Cpu {
     pub fn pc(&self) -> u16 {
         self.pc
     }
-    pub fn flags(&self) -> Flags {
-        self.flags
+    pub fn status(&self) -> Status {
+        self.status
     }
-    pub fn opcode(&self) -> Opcode {
-        self.state.opcode
-    }
-    pub fn address_mode(&self) -> AddressMode {
-        self.state.address_mode
+    pub fn jammed(&self) -> bool {
+        self.meta.jammed()
     }
 
-    pub fn force_pc(&mut self, value: u16) {
-        self.pc = value;
+    pub fn poke_pc(&mut self, pc: u16) {
+        self.interrupts.clear();
+        self.pc = pc;
     }
-}
-impl Cpu {
-    pub fn cycle(&mut self, bus: &mut impl CpuBus) {
-        bus.set_read(true);
-        bus.set_halted(false);
-
-        let mut backup = None;
-        if !bus.ready() {
-            backup = Some((*self, bus.backup()));
-        }
-
-        if bus.sync() {
-            // If you're reading this later, reminder:
-            // The interrupt logic goes in 'fetch', not here.
-            self.decode(bus);
-            bus.set_sync(false);
-        }
-
-        self.exec(bus);
-        self.poll_interrupts(bus);
-
-        if !bus.ready() && bus.read() {
-            let (new_self, bus_backup) = backup.unwrap();
-            *self = new_self;
-            bus.restore(bus_backup);
-            bus.set_halted(true);
-        }
+    pub fn pins_mut(&mut self) -> &mut CpuPins {
+        &mut self.pins
     }
-    fn poll_interrupts(&mut self, bus: &mut impl CpuBus) {
-        if !self.last_nmi && bus.nmi() {
-            self.nmi_pending = true;
-        }
-        self.irq_pending = bus.irq();
-
-        self.last_nmi = bus.nmi();
+    pub fn pins(&self) -> CpuPins {
+        self.pins
     }
-
-    fn decode(&mut self, bus: &mut impl CpuBus) {
-        let (opcode, address_mode) = decode(bus.data());
-        self.sync_state(opcode, address_mode);
+    pub fn instruction(&self) -> (Op, AddrMode) {
+        (self.op, self.addr_mode)
     }
-    fn sync_state(&mut self, opcode: Opcode, address_mode: AddressMode) {
-        self.state.address_mode_done = false;
-        self.state.opcode = opcode;
-        self.state.address_mode = address_mode;
-        self.state.address_mode_cycles = 0;
-        self.state.opcode_cycles = 0;
-        self.state.break_mode = BreakMode::brk();
-        self.state.page_crossed = false;
-    }
-
-    fn exec(&mut self, bus: &mut impl CpuBus) {
-        if !self.state.address_mode_done {
-            self.state.address_mode_done = self.exec_address_mode(bus);
-        }
-
-        if self.state.address_mode_done {
-            self.exec_opcode(bus);
-        }
-    }
-    fn exec_address_mode(&mut self, bus: &mut impl CpuBus) -> bool {
-        use AddressMode::*;
-        let done = match self.state.address_mode {
-            Implied => true,
-            Accumulator => true,
-            Immediate => self.exec_immediate(bus),
-            Zero => self.exec_zero(bus),
-            ZeroX => self.exec_zero_offset(bus, self.x),
-            ZeroY => self.exec_zero_offset(bus, self.y),
-            Absolute => self.exec_absolute(bus),
-            AbsoluteX => self.exec_absolute_offset(bus, self.x),
-            AbsoluteY => self.exec_absolute_offset(bus, self.y),
-            Indirect => self.exec_indirect(bus),
-            IndirectX => self.exec_indirect_x(bus),
-            IndirectY => self.exec_indirect_y(bus),
-            Relative => self.exec_relative(bus),
-        };
-        self.state.address_mode_cycles += 1;
-        done
-    }
-    fn exec_opcode(&mut self, bus: &mut impl CpuBus) {
-        use Opcode::*;
-        match self.state.opcode {
-            ADC => self.exec_adc(bus),
-            AND => self.exec_and(bus),
-            ASL => self.exec_asl(bus),
-            BCC => self.exec_generic_branch(!self.flags.carry, bus),
-            BCS => self.exec_generic_branch(self.flags.carry, bus),
-            BEQ => self.exec_generic_branch(self.flags.zero, bus),
-            BIT => self.exec_bit(bus),
-            BNE => self.exec_generic_branch(!self.flags.zero, bus),
-            BMI => self.exec_generic_branch(self.flags.negative, bus),
-            BPL => self.exec_generic_branch(!self.flags.negative, bus),
-            BVC => self.exec_generic_branch(!self.flags.overflow, bus),
-            BVS => self.exec_generic_branch(self.flags.overflow, bus),
-            BRK => self.exec_brk(bus),
-            CLC => self.exec_clc(bus),
-            CLD => self.exec_cld(bus),
-            CLI => self.exec_cli(bus),
-            CLV => self.exec_clv(bus),
-            CMP => self.exec_compare(self.a, bus),
-            CPX => self.exec_compare(self.x, bus),
-            CPY => self.exec_compare(self.y, bus),
-            DEC => self.exec_dec(bus),
-            DEX => self.exec_dex(bus),
-            DEY => self.exec_dey(bus),
-            EOR => self.exec_eor(bus),
-            INC => self.exec_inc(bus),
-            INX => self.exec_inx(bus),
-            INY => self.exec_iny(bus),
-            JMP => self.exec_jmp(bus),
-            JSR => self.exec_jsr(bus),
-            LDA => self.exec_lda(bus),
-            LDX => self.exec_ldx(bus),
-            LDY => self.exec_ldy(bus),
-            LSR => self.exec_lsr(bus),
-            NOP => self.exec_nop(bus),
-            ORA => self.exec_ora(bus),
-            PHA => self.exec_pha(bus),
-            PHP => self.exec_php(bus),
-            PLA => self.exec_pla(bus),
-            PLP => self.exec_plp(bus),
-            SBC => self.exec_sbc(bus),
-            SEC => self.exec_sec(bus),
-            SED => self.exec_sed(bus),
-            SEI => self.exec_sei(bus),
-            STA => self.exec_sta(bus),
-            STX => self.exec_stx(bus),
-            STY => self.exec_sty(bus),
-            TAX => self.exec_transfer(self.a, TransferTarget::X, bus),
-            TAY => self.exec_transfer(self.a, TransferTarget::Y, bus),
-            TSX => self.exec_transfer(self.sp, TransferTarget::X, bus),
-            TXS => self.exec_transfer(self.x, TransferTarget::S, bus),
-            TXA => self.exec_transfer(self.x, TransferTarget::A, bus),
-            TYA => self.exec_transfer(self.y, TransferTarget::A, bus),
-            ROL => self.exec_rol(bus),
-            ROR => self.exec_ror(bus),
-            RTI => self.exec_rti(bus),
-            RTS => self.exec_rts(bus),
-        }
-        self.state.opcode_cycles += 1;
-    }
-
-    fn exec_immediate(&mut self, bus: &mut impl CpuBus) -> bool {
-        match self.state.address_mode_cycles {
-            0 => {
-                self.read_pc_byte(bus);
-                false
-            }
-            1 => true,
-            _ => unreachable!(),
-        }
-    }
-    fn exec_zero(&mut self, bus: &mut impl CpuBus) -> bool {
-        match self.state.address_mode_cycles {
-            0 => self.read_pc_byte(bus),
-            1 => {
-                self.start_address_operand(bus.data());
-                if self.ignore_operand() {
-                    return true;
-                } else {
-                    self.read_address(bus);
-                }
-            }
-            2 => return true,
-            _ => unreachable!(),
-        }
-
-        false
-    }
-    fn exec_zero_offset(&mut self, bus: &mut impl CpuBus, offset: u8) -> bool {
-        match self.state.address_mode_cycles {
-            0 => self.read_pc_byte(bus),
-            1 => {
-                self.start_address_operand(bus.data().wrapping_add(offset));
-            }
-            2 => {
-                if self.ignore_operand() {
-                    return true;
-                } else {
-                    self.read(self.address() & 0xFF, bus);
-                }
-            }
-            3 => return true,
-            _ => unreachable!(),
-        }
-
-        false
-    }
-    fn exec_absolute(&mut self, bus: &mut impl CpuBus) -> bool {
-        match self.state.address_mode_cycles {
-            0 => {
-                self.read_pc_byte(bus);
-                false
-            }
-            1 => {
-                self.start_address_operand(bus.data());
-                self.read_pc_byte(bus);
-                false
-            }
-            2 => {
-                self.finish_address_operand(bus.data());
-                let ignores = self.ignore_operand();
-                if !ignores {
-                    self.read_address(bus);
-                }
-                ignores
-            }
-            3 => true,
-            _ => unreachable!(),
-        }
-    }
-    fn exec_absolute_offset(&mut self, bus: &mut impl CpuBus, offset: u8) -> bool {
-        match self.state.address_mode_cycles {
-            0 => {
-                self.read_pc_byte(bus);
-                false
-            }
-            1 => {
-                self.start_address_operand(bus.data());
-                self.read_pc_byte(bus);
-                false
-            }
-            2 => {
-                self.finish_address_operand(bus.data());
-                let carry = self.add_address(offset);
-                if carry {
-                    self.cross_page();
-                }
-
-                let ignores = self.ignore_operand();
-                if !ignores {
-                    self.read_address(bus);
-                }
-                ignores
-            }
-            3 => {
-                if self.page_crossed() {
-                    self.read_address(bus);
-                    false
-                } else {
-                    true
-                }
-            }
-            4 => true,
-            _ => unreachable!(),
-        }
-    }
-    fn exec_indirect(&mut self, bus: &mut impl CpuBus) -> bool {
-        match self.state.address_mode_cycles {
-            0 => {
-                self.read_pc_byte(bus);
-                false
-            }
-            1 => {
-                self.start_address_operand(bus.data());
-                self.read_pc_byte(bus);
-                false
-            }
-            2 => {
-                self.finish_address_operand(bus.data());
-                self.read_address(bus);
-                false
-            }
-            3 => {
-                let [low, high] = self.address().to_le_bytes();
-                let low = low.wrapping_add(1);
-                let address = u16::from_le_bytes([low, high]);
-                self.read(address, bus);
-                self.start_address_operand(bus.data());
-                false
-            }
-            4 => {
-                self.finish_address_operand(bus.data());
-                true
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_indirect_x(&mut self, bus: &mut impl CpuBus) -> bool {
-        match self.state.address_mode_cycles {
-            0 => {
-                self.read_pc_byte(bus);
-                false
-            }
-            1 => {
-                self.start_address_operand(bus.data().wrapping_add(self.x));
-                false
-            }
-            2 => {
-                self.read_address(bus);
-                false
-            }
-            3 => {
-                let address = self.address();
-                self.start_address_operand(bus.data());
-                self.read((address + 1) & 0xFF, bus);
-                false
-            }
-            4 => {
-                self.finish_address_operand(bus.data());
-                let ignore = self.ignore_operand();
-                if !ignore {
-                    self.read_address(bus);
-                }
-                ignore
-            }
-            5 => true,
-            _ => unreachable!(),
-        }
-    }
-    fn exec_indirect_y(&mut self, bus: &mut impl CpuBus) -> bool {
-        match self.state.address_mode_cycles {
-            0 => {
-                self.read_pc_byte(bus);
-                false
-            }
-            1 => {
-                self.start_address_operand(bus.data());
-                self.read_address(bus);
-                false
-            }
-            2 => {
-                let address = self.address() + 1;
-                self.start_address_operand(bus.data());
-                self.read(address & 0xFF, bus);
-                false
-            }
-            3 => {
-                self.finish_address_operand(bus.data());
-                let carry = self.add_address(self.y);
-                if carry {
-                    self.cross_page()
-                };
-
-                let ignores = self.ignore_operand();
-                if !ignores && !carry {
-                    self.read_address(bus);
-                }
-                ignores
-            }
-            4 => {
-                if self.page_crossed() {
-                    self.read_address(bus);
-                }
-                !self.page_crossed()
-            }
-            5 => true,
-            _ => unreachable!(),
-        }
-    }
-    fn exec_relative(&mut self, bus: &mut impl CpuBus) -> bool {
-        match self.state.address_mode_cycles {
-            0 => {
-                self.read_pc_byte(bus);
-                false
-            }
-            1 => {
-                let offset = bus.data().sign_cast() as i16;
-                let address = self.pc.wrapping_add_signed(offset);
-                if address & 0xFF00 != self.pc & 0xFF00 {
-                    self.cross_page();
-                }
-                self.set_address(address);
-                true
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn exec_adc(&mut self, bus: &mut impl CpuBus) {
-        debug_assert_eq!(
-            self.state.opcode_cycles, 0,
-            "ADC should never be executed with cycle != 0"
-        );
-
-        let b = bus.data();
-        let (a, carry) = self.a.carrying_add(b, self.flags.carry);
-
-        let signed_a = self.a.sign_cast();
-        let signed_b = b.sign_cast();
-        let (_, overflow) = signed_a.carrying_add(signed_b, self.flags.carry);
-
-        self.a = a;
-        self.flags.carry = carry;
-        self.flags.overflow = overflow;
-        self.set_regular_flags(a);
-
-        self.fetch(bus);
-    }
-    fn exec_and(&mut self, bus: &mut impl CpuBus) {
-        debug_assert_eq!(
-            self.state.opcode_cycles, 0,
-            "AND should never be executed with cycle != 0"
-        );
-
-        self.a &= bus.data();
-        self.set_regular_flags(self.a);
-
-        self.fetch(bus);
-    }
-    fn exec_asl(&mut self, bus: &mut impl CpuBus) {
-        let op = |x, flags: &mut Flags| {
-            flags.carry = x & 128 != 0;
-            x << 1
-        };
-
-        self.exec_rmw(bus, op);
-    }
-    fn exec_bit(&mut self, bus: &mut impl CpuBus) {
-        debug_assert_eq!(
-            self.state.opcode_cycles, 0,
-            "BIT should never be executed with cycle != 0"
-        );
-
-        let b = bus.data();
-        self.flags.negative = b & 128 != 0;
-        self.flags.overflow = b & 64 != 0;
-        self.flags.zero = self.a & b == 0;
-
-        self.fetch(bus);
-    }
-    fn exec_generic_branch(&mut self, c: bool, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                if c {
-                    self.pc = self.address();
-                } else {
-                    self.fetch(bus);
-                }
-            }
-            1 => {
-                if !self.page_crossed() {
-                    self.fetch(bus);
-                }
-            }
-            2 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_brk(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                if self.state.break_mode.increment_pc {
-                    self.pc += 1
-                }
-            }
-            1 => {
-                if self.state.break_mode.write {
-                    self.push(self.pch(), bus);
-                }
-            }
-            2 => {
-                if self.state.break_mode.write {
-                    self.push(self.pcl(), bus);
-                }
-            }
-            3 => {
-                let flags = self.flags.to_byte(self.state.break_mode.b_flag);
-                if self.state.break_mode.write {
-                    self.push(flags, bus);
-                }
-            }
-            4 => {
-                self.read(self.state.break_mode.vector, bus);
-            }
-            5 => {
-                self.start_address_operand(bus.data());
-                self.read(self.state.break_mode.vector + 1, bus);
-            }
-            6 => {
-                if self.state.break_mode.set_irq_disable {
-                    self.flags.irq_disable = true;
-                }
-                self.finish_address_operand(bus.data());
-                self.pc = self.state.address;
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_clc(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => self.flags.carry = false,
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_cld(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => self.flags.decimal = false,
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_cli(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => self.flags.irq_disable = false,
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_clv(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => self.flags.overflow = false,
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_compare(&mut self, a: u8, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                let b = bus.data();
-                let (result, carry) = a.overflowing_sub(b);
-                self.flags.carry = !carry;
-                self.set_regular_flags(result);
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_dec(&mut self, bus: &mut impl CpuBus) {
-        let op = |x: u8, _: &mut Flags| x.wrapping_sub(1);
-        self.exec_rmw(bus, op);
-    }
-    fn exec_dex(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                let value = self.x.wrapping_sub(1);
-                self.set_regular_flags(value);
-                self.x = value;
-            }
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_dey(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                let value = self.y.wrapping_sub(1);
-                self.set_regular_flags(value);
-                self.y = value;
-            }
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_eor(&mut self, bus: &mut impl CpuBus) {
-        debug_assert_eq!(
-            self.state.opcode_cycles, 0,
-            "EOR should never be executed with cycle != 0"
-        );
-
-        self.a ^= bus.data();
-        self.set_regular_flags(self.a);
-
-        self.fetch(bus);
-    }
-    fn exec_inc(&mut self, bus: &mut impl CpuBus) {
-        let op = |x: u8, _: &mut Flags| x.wrapping_add(1);
-        self.exec_rmw(bus, op);
-    }
-    fn exec_inx(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                let value = self.x.wrapping_add(1);
-                self.set_regular_flags(value);
-                self.x = value;
-            }
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_iny(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                let value = self.y.wrapping_add(1);
-                self.set_regular_flags(value);
-                self.y = value;
-            }
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_jmp(&mut self, bus: &mut impl CpuBus) {
-        debug_assert_eq!(self.state.opcode_cycles, 0);
-        self.pc = self.state.address;
-        self.fetch(bus);
-    }
-    fn exec_jsr(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                self.pc -= 1;
-                self.push(self.pch(), bus);
-            }
-            1 => {
-                self.push(self.pcl(), bus);
-                self.pc = self.state.address;
-            }
-            2 => {
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_lda(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                self.a = bus.data();
-                self.set_regular_flags(self.a);
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_ldx(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                self.x = bus.data();
-                self.set_regular_flags(self.x);
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_ldy(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                self.y = bus.data();
-                self.set_regular_flags(self.y);
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_lsr(&mut self, bus: &mut impl CpuBus) {
-        let op = |x, flags: &mut Flags| {
-            flags.carry = x & 1 != 0;
-            x >> 1
-        };
-
-        self.exec_rmw(bus, op);
-    }
-    fn exec_nop(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => (),
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_ora(&mut self, bus: &mut impl CpuBus) {
-        debug_assert_eq!(
-            self.state.opcode_cycles, 0,
-            "EOR should never be executed with cycle != 0"
-        );
-
-        self.a |= bus.data();
-        self.set_regular_flags(self.a);
-
-        self.fetch(bus);
-    }
-    fn exec_pha(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => (),
-            1 => {
-                self.push(self.a, bus);
-            }
-            2 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_php(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => (),
-            1 => {
-                self.push(self.flags.to_byte(true), bus);
-            }
-            2 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_pla(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => (),
-            1 => {
-                self.pop(bus);
-            }
-            2 => {
-                self.a = bus.data();
-                self.set_regular_flags(self.a);
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_plp(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => (),
-            1 => {
-                self.pop(bus);
-            }
-            2 => {
-                self.flags = Flags::from_byte(bus.data());
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_sbc(&mut self, bus: &mut impl CpuBus) {
-        debug_assert_eq!(
-            self.state.opcode_cycles, 0,
-            "SBC should never be executed with cycle != 0"
-        );
-
-        let b = bus.data();
-        let (a, carry) = self.a.borrowing_sub(b, !self.flags.carry);
-
-        let signed_a = self.a.sign_cast();
-        let signed_b = b.sign_cast();
-        let (_, overflow) = signed_a.borrowing_sub(signed_b, self.flags.carry);
-
-        self.a = a;
-        self.flags.carry = !carry;
-        self.flags.overflow = overflow;
-        self.set_regular_flags(a);
-
-        self.fetch(bus);
-    }
-    fn exec_sec(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => self.flags.carry = true,
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_sed(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => self.flags.decimal = true,
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_sei(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => self.flags.irq_disable = true,
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_sta(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                self.write(self.state.address, self.a, bus);
-            }
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_stx(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                self.write(self.state.address, self.x, bus);
-            }
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_sty(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                self.write(self.state.address, self.y, bus);
-            }
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_transfer(&mut self, value: u8, into: TransferTarget, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => {
-                let target = match into {
-                    TransferTarget::A => &mut self.a,
-                    TransferTarget::X => &mut self.x,
-                    TransferTarget::Y => &mut self.y,
-                    TransferTarget::S => &mut self.sp,
-                };
-                *target = value;
-
-                let affect_flags = into != TransferTarget::S;
-                if affect_flags {
-                    self.set_regular_flags(value);
-                }
-            }
-            1 => self.fetch(bus),
-            _ => unreachable!(),
-        }
-    }
-    fn exec_rol(&mut self, bus: &mut impl CpuBus) {
-        let op = |x, flags: &mut Flags| {
-            let old_carry = flags.carry as u8;
-            flags.carry = x & 128 != 0;
-            (x << 1) | old_carry
-        };
-
-        self.exec_rmw(bus, op);
-    }
-    fn exec_ror(&mut self, bus: &mut impl CpuBus) {
-        let op = |x, flags: &mut Flags| {
-            let old_carry = (flags.carry as u8) << 7;
-            flags.carry = x & 1 != 0;
-            (x >> 1) | old_carry
-        };
-
-        self.exec_rmw(bus, op);
-    }
-    fn exec_rts(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => (),
-            1 => (),
-            2 => {
-                self.pop(bus);
-            }
-            3 => {
-                self.start_address_operand(bus.data());
-                self.pop(bus);
-            }
-            4 => {
-                self.finish_address_operand(bus.data());
-            }
-            5 => {
-                self.pc = self.address() + 1;
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-    fn exec_rti(&mut self, bus: &mut impl CpuBus) {
-        match self.state.opcode_cycles {
-            0 => (),
-            1 => (),
-            2 => {
-                self.pop(bus);
-            }
-            3 => {
-                self.flags = Flags::from_byte(bus.data());
-                self.pop(bus);
-            }
-            4 => {
-                self.start_address_operand(bus.data());
-                self.pop(bus);
-            }
-            5 => {
-                self.finish_address_operand(bus.data());
-                self.pc = self.address();
-                self.fetch(bus);
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn exec_rmw(&mut self, bus: &mut impl CpuBus, op: fn(u8, &mut Flags) -> u8) {
-        if self.state.address_mode == AddressMode::Accumulator {
-            match self.state.opcode_cycles {
-                0 => {
-                    self.a = op(self.a, &mut self.flags);
-                    self.set_regular_flags(self.a);
-                }
-                1 => self.fetch(bus),
-                _ => unreachable!(),
-            }
-        } else {
-            match self.state.opcode_cycles {
-                0 => {
-                    self.write(self.address(), bus.data(), bus);
-                }
-                1 => {
-                    let old_value = bus.data();
-                    let value = op(old_value, &mut self.flags);
-                    self.set_regular_flags(value);
-                    self.write(self.address(), value, bus);
-                }
-                2 => self.fetch(bus),
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    fn set_regular_flags(&mut self, value: u8) {
-        self.flags.zero = value == 0;
-        self.flags.negative = value > 127;
-    }
-
-    fn read(&mut self, address: u16, bus: &mut impl CpuBus) {
-        bus.set_address(address);
-    }
-    fn write(&mut self, address: u16, value: u8, bus: &mut impl CpuBus) {
-        bus.set_address(address);
-        bus.set_data(value);
-        bus.set_read(false);
-    }
-    fn push(&mut self, value: u8, bus: &mut impl CpuBus) {
-        let address = 0x100 + self.sp as u16;
-        self.sp = self.sp.wrapping_sub(1);
-        self.write(address, value, bus);
-    }
-    fn pop(&mut self, bus: &mut impl CpuBus) {
-        self.sp = self.sp.wrapping_add(1);
-        let address = 0x100 + self.sp as u16;
-        self.read(address, bus);
-    }
-    fn fetch(&mut self, bus: &mut impl CpuBus) {
-        if self.nmi_pending {
-            self.nmi_pending = false;
-            self.sync_state(Opcode::BRK, AddressMode::Implied);
-            self.state.break_mode = BreakMode::nmi();
-        } else if self.irq_pending && !self.flags.irq_disable {
-            self.sync_state(Opcode::BRK, AddressMode::Implied);
-            self.state.break_mode = BreakMode::irq();
-        } else {
-            self.read_pc_byte(bus);
-            bus.set_sync(true);
-        }
-    }
-    fn read_pc_byte(&mut self, bus: &mut impl CpuBus) {
-        self.read(self.pc, bus);
-        self.pc += 1;
-    }
-    fn start_address_operand(&mut self, byte: u8) {
-        self.state.address = byte as u16;
-    }
-    fn finish_address_operand(&mut self, byte: u8) {
-        self.state.address |= (byte as u16) << 8;
-    }
-    fn add_address(&mut self, offset: u8) -> bool {
-        let low = (self.address() & 0xFF) as u8;
-        let high = (self.address() >> 8) as u8;
-        let (new_low, carry) = low.overflowing_add(offset);
-        let new_high = if !carry { high } else { high.wrapping_add(1) };
-        let new_address = (new_low as u16) | (new_high as u16) << 8;
-        self.set_address(new_address);
-        carry
-    }
-    fn pcl(&self) -> u8 {
-        (self.pc & 0xFF) as u8
-    }
-    fn pch(&self) -> u8 {
-        (self.pc >> 8) as u8
-    }
-    fn ignore_operand(&self) -> bool {
-        self.state.opcode.ignores_operand()
-    }
-    fn page_crossed(&self) -> bool {
-        self.state.page_crossed
-    }
-    fn cross_page(&mut self) {
-        self.state.page_crossed = true;
-    }
-    fn address(&self) -> u16 {
-        self.state.address
-    }
-    fn set_address(&mut self, address: u16) {
-        self.state.address = address;
-    }
-    fn read_address(&mut self, bus: &mut impl CpuBus) {
-        self.read(self.address(), bus);
+    pub fn is_doing_interrupt(&self) -> bool {
+        self.break_mode != BreakMode::Break
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Flags {
-    pub carry: bool,
-    pub zero: bool,
-    pub irq_disable: bool,
-    pub decimal: bool,
-    pub overflow: bool,
-    pub negative: bool,
-}
-impl Flags {
-    fn init() -> Flags {
-        Self {
-            carry: false,
-            overflow: false,
-            zero: false,
-            negative: false,
-            decimal: false,
-            irq_disable: true,
-        }
-    }
-
-    fn to_byte(self, b_flag: bool) -> u8 {
-        let mut byte = 0;
-        byte |= self.carry as u8;
-        byte |= (self.zero as u8) << 1;
-        byte |= (self.irq_disable as u8) << 2;
-        byte |= (self.decimal as u8) << 3;
-        byte |= (b_flag as u8) << 4;
-        byte |= 1 << 5;
-        byte |= (self.overflow as u8) << 6;
-        byte |= (self.negative as u8) << 7;
-
-        byte
-    }
-    fn from_byte(byte: u8) -> Self {
-        Self {
-            carry: byte & 1 != 0,
-            zero: byte & 2 != 0,
-            irq_disable: byte & 4 != 0,
-            decimal: byte & 8 != 0,
-            overflow: byte & 64 != 0,
-            negative: byte & 128 != 0,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct BreakMode {
-    vector: u16,
-    b_flag: bool,
-    increment_pc: bool,
-    write: bool,
-    set_irq_disable: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BreakMode {
+    Break,
+    Irq,
+    Nmi,
+    Reset,
 }
 impl BreakMode {
-    fn brk() -> Self {
-        Self {
-            vector: 0xFFFE,
-            b_flag: true,
-            write: true,
-            set_irq_disable: true,
-            increment_pc: true,
+    fn increment_pc(self) -> bool {
+        match self {
+            Self::Break => true,
+            _ => false,
         }
     }
-    fn irq() -> Self {
-        Self {
-            vector: 0xFFFE,
-            b_flag: false,
-            write: true,
-            set_irq_disable: true,
-            increment_pc: false,
+    fn suppress_writes(self) -> bool {
+        match self {
+            Self::Break => false,
+            Self::Irq => false,
+            Self::Nmi => false,
+            Self::Reset => true,
         }
     }
-    fn nmi() -> Self {
-        Self {
-            vector: 0xFFFA,
-            b_flag: false,
-            write: true,
-            set_irq_disable: false,
-            increment_pc: false,
-        }
+    fn set_brk_flag(self) -> bool {
+        matches!(self, BreakMode::Break)
     }
-    fn reset() -> Self {
-        Self {
-            vector: 0xFFFC,
-            b_flag: false,
-            write: false,
-            set_irq_disable: true,
-            increment_pc: false,
+    fn vector(self) -> u16 {
+        match self {
+            Self::Nmi => 0xFFFA,
+            Self::Reset => 0xFFFC,
+            Self::Break | Self::Irq => 0xFFFE,
         }
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-struct State {
-    break_mode: BreakMode,
-    /// The number of cycles that the relevant addressing mode has been executing for.
-    address_mode_cycles: u8,
-    /// The number of cycles that the relevant instruction sans addressing mode has been executing for.
-    opcode_cycles: u8,
-
-    address_mode_done: bool,
-    opcode: Opcode,
-    address_mode: AddressMode,
-
-    address: u16,
-    page_crossed: bool,
-}
-impl State {
-    fn init() -> Self {
-        Self {
-            break_mode: BreakMode::reset(),
-            address_mode_cycles: 0,
-            opcode_cycles: 0,
-            address_mode_done: true,
-            opcode: Opcode::BRK,
-            address_mode: AddressMode::Implied,
-            address: 0,
-            page_crossed: false,
-        }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Meta(u8);
+impl Meta {
+    pub fn init() -> Self {
+        Self(0)
     }
-}
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum TransferTarget {
-    A,
-    X,
-    Y,
-    S,
-}
-
-trait SignCast {
-    type FlippedType;
-    fn sign_cast(self) -> Self::FlippedType;
-}
-
-impl SignCast for u8 {
-    type FlippedType = i8;
-    fn sign_cast(self) -> Self::FlippedType {
-        i8::from_le_bytes(self.to_le_bytes())
+    pub fn jammed(self) -> bool {
+        self.0 & (1 << Self::JAMMED) != 0
     }
-}
-impl SignCast for i8 {
-    type FlippedType = u8;
-    fn sign_cast(self) -> Self::FlippedType {
-        u8::from_le_bytes(self.to_le_bytes())
+    pub fn last_nmi(self) -> bool {
+        self.0 & (1 << Self::LAST_NMI) != 0
     }
+    pub fn last_rst(self) -> bool {
+        self.0 & (1 << Self::LAST_RST) != 0
+    }
+
+    pub fn set_jammed(&mut self, jammed: bool) {
+        let mask = 1 << Self::JAMMED;
+        self.0 &= !mask;
+        self.0 |= (jammed as u8) * mask
+    }
+    pub fn set_last_nmi(&mut self, last_nmi: bool) {
+        let mask = 1 << Self::LAST_NMI;
+        self.0 &= !mask;
+        self.0 |= (last_nmi as u8) * mask
+    }
+    pub fn set_last_rst(&mut self, last_rst: bool) {
+        let mask = 1 << Self::LAST_RST;
+        self.0 &= !mask;
+        self.0 |= (last_rst as u8) * mask
+    }
+
+    const JAMMED: u8 = 0;
+    const LAST_NMI: u8 = 1;
+    const LAST_RST: u8 = 2;
 }
 
-pub trait CpuBus {
-    type Backup;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Interrupts(u8);
+impl Interrupts {
+    pub fn init() -> Self {
+        let bits = 1 << Self::RESET;
+        Self(bits)
+    }
 
-    fn address(&self) -> u16;
-    fn set_address(&mut self, addr: u16);
+    pub fn irq(self) -> bool {
+        let bit = 1 << Self::IRQ;
+        (self.0 & bit) != 0
+    }
+    pub fn nmi(self) -> bool {
+        let bit = 1 << Self::NMI;
+        (self.0 & bit) != 0
+    }
+    pub fn reset(self) -> bool {
+        let bit = 1 << Self::RESET;
+        (self.0 & bit) != 0
+    }
 
-    fn data(&self) -> u8;
-    fn set_data(&mut self, data: u8);
+    pub fn set_irq(&mut self, irq: bool) {
+        let mask = 1 << Self::IRQ;
+        self.0 &= !mask;
+        self.0 |= mask * irq as u8;
+    }
+    pub fn or_nmi(&mut self, nmi: bool) {
+        let mask = 1 << Self::NMI;
+        self.0 |= if nmi { mask } else { 0 };
+    }
+    pub fn or_reset(&mut self, reset: bool) {
+        let mask = 1 << Self::RESET;
+        self.0 |= if reset { mask } else { 0 };
+    }
 
-    fn read(&self) -> bool;
-    fn set_read(&mut self, read: bool);
-    fn sync(&self) -> bool;
-    fn set_sync(&mut self, sync: bool);
-    fn halted(&self) -> bool;
-    fn set_halted(&mut self, halted: bool);
-    fn ready(&self) -> bool;
-    fn irq(&self) -> bool;
-    fn nmi(&self) -> bool;
-    fn reset(&self) -> bool;
+    pub fn clear_nmi(&mut self) {
+        self.0 &= !(1 << Self::NMI);
+    }
 
-    fn backup(&self) -> Self::Backup;
-    fn restore(&mut self, backup: Self::Backup);
+    pub fn clear(&mut self) {
+        self.0 = 0;
+    }
+
+    const IRQ: u8 = 0;
+    const NMI: u8 = 1;
+    const RESET: u8 = 2;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Status(u8);
+impl Status {
+    pub fn init() -> Self {
+        let mut ret = Self(0);
+        ret.set_irq_disable(true);
+        ret
+    }
+
+    pub fn carry(self) -> bool {
+        (self.0 >> Self::CARRY) & 1 != 0
+    }
+    pub fn zero(self) -> bool {
+        (self.0 >> Self::ZERO) & 1 != 0
+    }
+    pub fn irq_disable(self) -> bool {
+        (self.0 >> Self::IRQ_DISABLE) & 1 != 0
+    }
+    pub fn decimal(self) -> bool {
+        (self.0 >> Self::DECIMAL) & 1 != 0
+    }
+    pub fn overflow(self) -> bool {
+        (self.0 >> Self::OVERFLOW) & 1 != 0
+    }
+    pub fn negative(self) -> bool {
+        (self.0 >> Self::NEGATIVE) & 1 != 0
+    }
+
+    pub fn set_carry(&mut self, carry: bool) {
+        let bit = 1 << Self::CARRY;
+        self.0 &= !bit;
+        self.0 |= bit * carry as u8;
+    }
+    pub fn set_zero(&mut self, zero: bool) {
+        let bit = 1 << Self::ZERO;
+        self.0 &= !bit;
+        self.0 |= bit * zero as u8;
+    }
+    pub fn set_irq_disable(&mut self, irq_disable: bool) {
+        let bit = 1 << Self::IRQ_DISABLE;
+        self.0 &= !bit;
+        self.0 |= bit * irq_disable as u8;
+    }
+    pub fn set_decimal(&mut self, decimal: bool) {
+        let bit = 1 << Self::DECIMAL;
+        self.0 &= !bit;
+        self.0 |= bit * decimal as u8;
+    }
+    pub fn set_overflow(&mut self, overflow: bool) {
+        let bit = 1 << Self::OVERFLOW;
+        self.0 &= !bit;
+        self.0 |= bit * overflow as u8;
+    }
+    pub fn set_negative(&mut self, negative: bool) {
+        let bit = 1 << Self::NEGATIVE;
+        self.0 &= !bit;
+        self.0 |= bit * negative as u8;
+    }
+
+    pub fn bits(&self) -> u8 {
+        self.0
+    }
+
+    pub fn to_pushable_bits(self, brk: bool) -> u8 {
+        let brk = if brk { 1 << Self::BREAK } else { 0 };
+        let set = 1 << Self::SET;
+        self.0 | brk | set
+    }
+    pub fn from_pushable_bits(bits: u8) -> Self {
+        let mask = 0b11001111;
+        Self(bits & mask)
+    }
+
+    const CARRY: u8 = 0;
+    const ZERO: u8 = 1;
+    const IRQ_DISABLE: u8 = 2;
+    const DECIMAL: u8 = 3;
+    const BREAK: u8 = 4;
+    const SET: u8 = 5;
+    const OVERFLOW: u8 = 6;
+    const NEGATIVE: u8 = 7;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CpuPins(u32);
+impl CpuPins {
+    pub fn init() -> Self {
+        Self(0)
+    }
+
+    pub fn address(self) -> u16 {
+        (self.0 >> Self::ADDRESS) as u16
+    }
+    pub fn data(self) -> u8 {
+        (self.0 >> Self::DATA) as u8
+    }
+    pub fn read(self) -> bool {
+        self.0 & (1 << Self::READ) != 0
+    }
+    pub fn not_ready(self) -> bool {
+        self.0 & (1 << Self::NOT_READY) != 0
+    }
+    pub fn halt(self) -> bool {
+        self.0 & (1 << Self::NOT_READY) != 0
+    }
+    pub fn irq(self) -> bool {
+        self.0 & (1 << Self::IRQ) != 0
+    }
+    pub fn nmi(self) -> bool {
+        self.0 & (1 << Self::NMI) != 0
+    }
+    pub fn rst(self) -> bool {
+        self.0 & (1 << Self::RST) != 0
+    }
+    pub fn sync(self) -> bool {
+        self.0 & (1 << Self::SYNC) != 0
+    }
+
+    pub fn set_address(&mut self, address: u16) {
+        let not_mask = 0xFFFF << Self::ADDRESS;
+        let mask = !not_mask;
+        let unmasked = self.0 & mask;
+        let address = (address as u32) << Self::ADDRESS;
+        self.0 = unmasked | address;
+    }
+    pub fn set_data(&mut self, data: u8) {
+        let not_mask = 0xFF << Self::DATA;
+        let mask = !not_mask;
+        let unmasked = self.0 & mask;
+        let address = (data as u32) << Self::DATA;
+        self.0 = unmasked | address;
+    }
+    pub fn set_read(&mut self, read: bool) {
+        let bit = 1 << Self::READ;
+        self.0 &= !bit;
+        self.0 |= bit * read as u32;
+    }
+    pub fn set_not_ready(&mut self, not_ready: bool) {
+        let bit = 1 << Self::NOT_READY;
+        self.0 &= !bit;
+        self.0 |= bit * not_ready as u32;
+    }
+    pub fn set_halt(&mut self, halt: bool) {
+        let bit = 1 << Self::HALT;
+        self.0 &= !bit;
+        self.0 |= bit * halt as u32;
+    }
+    pub fn set_irq(&mut self, irq: bool) {
+        let bit = 1 << Self::IRQ;
+        self.0 &= !bit;
+        self.0 |= bit * irq as u32;
+    }
+    pub fn set_nmi(&mut self, nmi: bool) {
+        let bit = 1 << Self::NMI;
+        self.0 &= !bit;
+        self.0 |= bit * nmi as u32;
+    }
+    pub fn set_rst(&mut self, rst: bool) {
+        let bit = 1 << Self::RST;
+        self.0 &= !bit;
+        self.0 |= bit * rst as u32;
+    }
+    pub fn set_sync(&mut self, sync: bool) {
+        let bit = 1 << Self::SYNC;
+        self.0 &= !bit;
+        self.0 |= bit * sync as u32;
+    }
+
+    const ADDRESS: u32 = 0;
+    const DATA: u32 = 16;
+    const READ: u32 = 24;
+    const NOT_READY: u32 = 25;
+    const HALT: u32 = 26;
+    const IRQ: u32 = 27;
+    const NMI: u32 = 28;
+    const RST: u32 = 29;
+    const SYNC: u32 = 30;
+}
+
+pub trait Bus6502 {
+    /// Called by the CPU whenever it completes a cycle so that external devices can update themselves.
+    fn cycle(&mut self, cpu: &mut Cpu6502);
 }

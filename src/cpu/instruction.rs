@@ -1,156 +1,7 @@
 use std::fmt::Display;
 
-pub fn decode(byte: u8) -> (Opcode, AddressMode) {
-    use AddressMode::*;
-    use Opcode::*;
-    match byte {
-        0x00 => (BRK, Implied),
-        0xd8 => (CLD, Implied),
-        0xea => (NOP, Implied),
-        0xa2 => (LDX, Immediate),
-        0x96 => (STX, ZeroY),
-        0xb6 => (LDX, ZeroY),
-        0xbe => (LDX, AbsoluteY),
-        0x9a => (TXS, Implied),
-        0xba => (TSX, Implied),
-        0x4c => (JMP, Absolute),
-        0x6c => (JMP, Indirect),
-        0x8a => (TXA, Implied),
-        0xaa => (TAX, Implied),
-        0xca => (DEX, Implied),
-        0xa0 => (LDY, Immediate),
-        0xc0 => (CPY, Immediate),
-        0xe0 => (CPX, Immediate),
-        0x20 => (JSR, Absolute),
-        0x60 => (RTS, Implied),
-        0x40 => (RTI, Implied),
-        0xBC => (LDY, AbsoluteX),
-        _ => {
-            let a = byte >> 5;
-            let b = (byte >> 2) & 0b111;
-            let c = byte & 0b11;
-
-            if c == 1 && !(a == 4 && b == 2) {
-                let opcode = match a {
-                    0 => ORA,
-                    1 => AND,
-                    2 => EOR,
-                    3 => ADC,
-                    4 => STA,
-                    5 => LDA,
-                    6 => CMP,
-                    7 => SBC,
-                    _ => unreachable!(),
-                };
-                let mode = match b {
-                    0 => IndirectX,
-                    1 => Zero,
-                    2 => Immediate,
-                    3 => Absolute,
-                    4 => IndirectY,
-                    5 => ZeroX,
-                    6 => AbsoluteY,
-                    7 => AbsoluteX,
-                    _ => unreachable!(),
-                };
-                return (opcode, mode);
-            }
-            if c == 2 && (b == 1 || b == 3 || (b == 2 && a < 4) || b == 5 || (b == 7 && a != 4)) {
-                let opcode = match a {
-                    0 => ASL,
-                    1 => ROL,
-                    2 => LSR,
-                    3 => ROR,
-                    4 => STX,
-                    5 => LDX,
-                    6 => DEC,
-                    7 => INC,
-                    _ => unreachable!(),
-                };
-                let mode = match b {
-                    1 => Zero,
-                    2 => Accumulator,
-                    3 => Absolute,
-                    5 => ZeroX,
-                    7 => AbsoluteX,
-                    _ => unreachable!(),
-                };
-                return (opcode, mode);
-            }
-            if c == 0
-                && ((b == 3 && a != 0)
-                    || (b == 1 && a >= 4)
-                    || (b == 1 && a == 1)
-                    || (b == 5 && a == 4)
-                    || (b == 5 && a == 5))
-            {
-                let opcode = match a {
-                    1 => BIT,
-                    4 => STY,
-                    5 => LDY,
-                    6 => CPY,
-                    7 => CPX,
-                    _ => unreachable!(),
-                };
-                let mode = match b {
-                    1 => Zero,
-                    3 => Absolute,
-                    5 => ZeroX,
-                    _ => unreachable!(),
-                };
-                return (opcode, mode);
-            }
-            if c == 0 && b == 2 {
-                let opcode = match a {
-                    0 => PHP,
-                    1 => PLP,
-                    2 => PHA,
-                    3 => PLA,
-                    4 => DEY,
-                    5 => TAY,
-                    6 => INY,
-                    7 => INX,
-                    _ => unreachable!(),
-                };
-
-                return (opcode, Implied);
-            }
-            if c == 0 && b == 4 {
-                let opcode = match a {
-                    0 => BPL,
-                    1 => BMI,
-                    2 => BVC,
-                    3 => BVS,
-                    4 => BCC,
-                    5 => BCS,
-                    6 => BNE,
-                    7 => BEQ,
-                    _ => unreachable!(),
-                };
-                return (opcode, Relative);
-            }
-            if c == 0 && b == 6 {
-                let opcode = match a {
-                    0 => CLC,
-                    1 => SEC,
-                    2 => CLI,
-                    3 => SEI,
-                    4 => TYA,
-                    5 => CLV,
-                    6 => CLD,
-                    7 => SED,
-                    _ => unreachable!(),
-                };
-                return (opcode, Implied);
-            }
-
-            panic!("Unrecognized opcode {byte:x}: a = {a}, b = {b}, c = {c}")
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Opcode {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Op {
     ADC,
     AND,
     ASL,
@@ -161,9 +12,9 @@ pub enum Opcode {
     BMI,
     BNE,
     BPL,
+    BRK,
     BVC,
     BVS,
-    BRK,
     CLC,
     CLD,
     CLI,
@@ -207,19 +58,57 @@ pub enum Opcode {
     TXA,
     TXS,
     TYA,
+
+    // Illegal operations
+    ALR,
+    ANC,
+    ANE,
+    ARR,
+    DCP,
+    ISC,
+    LAS,
+    LAX,
+    LXA,
+    RLA,
+    RRA,
+    SAX,
+    SBX,
+    SHA,
+    SHX,
+    SHY,
+    SLO,
+    SRE,
+    TAS,
+    JAM,
 }
-impl Opcode {
-    pub fn ignores_operand(self) -> bool {
-        use Opcode::*;
-        matches!(self, STA | STX | STY | JMP | JSR)
+impl Op {
+    pub fn reads_operand(self) -> bool {
+        use Op::*;
+        self.is_rmw()
+            || matches!(
+                self,
+                LDA | LDX | LDY | EOR | AND | ORA | ADC | SBC | CMP | CPX | CPY | BIT | LAX | NOP
+            )
+    }
+    pub fn writes_operand(self) -> bool {
+        use Op::*;
+        self.is_rmw() || matches!(self, STA | STX | STY | SAX)
+    }
+    pub fn is_rmw(self) -> bool {
+        use Op::*;
+        matches!(
+            self,
+            ASL | LSR | ROL | ROR | INC | DEC | SLO | SRE | RLA | RRA | ISC | DCP | SHA | SHX | SHY
+        )
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum AddressMode {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AddrMode {
     Implied,
-    Accumulator,
     Immediate,
+    Relative,
+    Accumulator,
     Zero,
     ZeroX,
     ZeroY,
@@ -227,27 +116,239 @@ pub enum AddressMode {
     AbsoluteX,
     AbsoluteY,
     Indirect,
-    IndirectX,
+    XIndirect,
     IndirectY,
-    Relative,
 }
-impl Display for AddressMode {
+impl Display for AddrMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use AddressMode::*;
-        match self {
-            Implied => write!(f, ""),
-            Accumulator => write!(f, "acc"),
-            Immediate => write!(f, "#"),
-            Zero => write!(f, "[#]"),
-            ZeroX => write!(f, "[# + x]"),
-            ZeroY => write!(f, "[# + y]"),
-            Absolute => write!(f, "[$]"),
-            AbsoluteX => write!(f, "[$ + x]"),
-            AbsoluteY => write!(f, "[$ + y]"),
-            Indirect => write!(f, "[[$]]"),
-            IndirectX => write!(f, "[[$ + x]]"),
-            IndirectY => write!(f, "[[$] + y]"),
-            Relative => write!(f, "#"),
-        }
+        let str = match self {
+            Self::Implied => "",
+            Self::Immediate => "#",
+            Self::Relative => "#",
+            Self::Accumulator => "A",
+            Self::Zero => "[#]",
+            Self::ZeroX => "[#+X]",
+            Self::ZeroY => "[#+Y]",
+            Self::Absolute => "[$]",
+            Self::AbsoluteX => "[$+X]",
+            Self::AbsoluteY => "[$+Y]",
+            Self::Indirect => "[[$]]",
+            Self::XIndirect => "[[#+X]]",
+            Self::IndirectY => "[[#] + Y]",
+        };
+
+        Display::fmt(str, f)
+    }
+}
+
+pub fn decode(opcode: u8) -> (Op, AddrMode) {
+    let a = opcode >> 5;
+    let b = opcode >> 2 & 7;
+    let c = opcode & 3;
+
+    let addr_mode = decode_addr_mode(a, b, c);
+    let op = decode_op(a, b, c);
+
+    (op, addr_mode)
+}
+
+fn decode_op(a: u8, b: u8, c: u8) -> Op {
+    match (a, b, c) {
+        (0, 0, 0) => Op::BRK,
+        (0, 2, 0) => Op::PHP,
+        (0, 4, 0) => Op::BPL,
+        (0, 6, 0) => Op::CLC,
+        (0, _, 0) => Op::NOP,
+
+        (1, 0, 0) => Op::JSR,
+        (1, 1, 0) => Op::BIT,
+        (1, 2, 0) => Op::PLP,
+        (1, 3, 0) => Op::BIT,
+        (1, 4, 0) => Op::BMI,
+        (1, 5, 0) => Op::NOP,
+        (1, 6, 0) => Op::SEC,
+        (1, 7, 0) => Op::NOP,
+
+        (2, 0, 0) => Op::RTI,
+        (2, 1, 0) => Op::NOP,
+        (2, 2, 0) => Op::PHA,
+        (2, 3, 0) => Op::JMP,
+        (2, 4, 0) => Op::BVC,
+        (2, 5, 0) => Op::NOP,
+        (2, 6, 0) => Op::CLI,
+        (2, 7, 0) => Op::NOP,
+
+        (3, 0, 0) => Op::RTS,
+        (3, 1, 0) => Op::NOP,
+        (3, 2, 0) => Op::PLA,
+        (3, 3, 0) => Op::JMP,
+        (3, 4, 0) => Op::BVS,
+        (3, 5, 0) => Op::NOP,
+        (3, 6, 0) => Op::SEI,
+        (3, 7, 0) => Op::NOP,
+
+        (4, 0, 0) => Op::NOP,
+        (4, 1, 0) => Op::STY,
+        (4, 2, 0) => Op::DEY,
+        (4, 3, 0) => Op::STY,
+        (4, 4, 0) => Op::BCC,
+        (4, 5, 0) => Op::STY,
+        (4, 6, 0) => Op::TYA,
+        (4, 7, 0) => Op::SHY,
+
+        (5, 0, 0) => Op::LDY,
+        (5, 1, 0) => Op::LDY,
+        (5, 2, 0) => Op::TAY,
+        (5, 3, 0) => Op::LDY,
+        (5, 4, 0) => Op::BCS,
+        (5, 5, 0) => Op::LDY,
+        (5, 6, 0) => Op::CLV,
+        (5, 7, 0) => Op::LDY,
+
+        (6, 0, 0) => Op::CPY,
+        (6, 1, 0) => Op::CPY,
+        (6, 2, 0) => Op::INY,
+        (6, 3, 0) => Op::CPY,
+        (6, 4, 0) => Op::BNE,
+        (6, 5, 0) => Op::NOP,
+        (6, 6, 0) => Op::CLD,
+        (6, 7, 0) => Op::NOP,
+
+        (7, 0, 0) => Op::CPX,
+        (7, 1, 0) => Op::CPX,
+        (7, 2, 0) => Op::INX,
+        (7, 3, 0) => Op::CPX,
+        (7, 4, 0) => Op::BEQ,
+        (7, 5, 0) => Op::NOP,
+        (7, 6, 0) => Op::SED,
+        (7, 7, 0) => Op::NOP,
+
+        (0, _, 1) => Op::ORA,
+        (1, _, 1) => Op::AND,
+        (2, _, 1) => Op::EOR,
+        (3, _, 1) => Op::ADC,
+        (4, 2, 1) => Op::NOP,
+        (4, _, 1) => Op::STA,
+        (5, _, 1) => Op::LDA,
+        (6, _, 1) => Op::CMP,
+        (7, _, 1) => Op::SBC,
+
+        (_, 4, 2) => Op::JAM,
+        (0..=3, 0, 2) => Op::JAM,
+        (0..=3, 6, 2) => Op::NOP,
+        (0, _, 2) => Op::ASL,
+        (1, _, 2) => Op::ROL,
+        (2, _, 2) => Op::LSR,
+        (3, _, 2) => Op::ROR,
+
+        (4, 0, 2) => Op::NOP,
+        (4, 1, 2) => Op::STX,
+        (4, 2, 2) => Op::TXA,
+        (4, 3, 2) => Op::STX,
+        (4, 5, 2) => Op::STX,
+        (4, 6, 2) => Op::TXS,
+        (4, 7, 2) => Op::SHX,
+
+        (5, 0, 2) => Op::LDX,
+        (5, 1, 2) => Op::LDX,
+        (5, 2, 2) => Op::TAX,
+        (5, 3, 2) => Op::LDX,
+        (5, 5, 2) => Op::LDX,
+        (5, 6, 2) => Op::TSX,
+        (5, 7, 2) => Op::LDX,
+
+        (6, 0, 2) => Op::NOP,
+        (6, 1, 2) => Op::DEC,
+        (6, 2, 2) => Op::DEX,
+        (6, 3, 2) => Op::DEC,
+        (6, 5, 2) => Op::DEC,
+        (6, 6, 2) => Op::NOP,
+        (6, 7, 2) => Op::DEC,
+
+        (7, 0, 2) => Op::NOP,
+        (7, 1, 2) => Op::INC,
+        (7, 2, 2) => Op::NOP,
+        (7, 3, 2) => Op::INC,
+        (7, 5, 2) => Op::INC,
+        (7, 6, 2) => Op::NOP,
+        (7, 7, 2) => Op::INC,
+
+        (0, 2, 3) => Op::ANC,
+        (0, _, 3) => Op::SLO,
+
+        (1, 2, 3) => Op::ANC,
+        (1, _, 3) => Op::RLA,
+
+        (2, 2, 3) => Op::ALR,
+        (2, _, 3) => Op::SRE,
+
+        (3, 2, 3) => Op::ARR,
+        (3, _, 3) => Op::RRA,
+
+        (4, 0, 3) => Op::SAX,
+        (4, 1, 3) => Op::SAX,
+        (4, 2, 3) => Op::ANE,
+        (4, 3, 3) => Op::SAX,
+        (4, 4, 3) => Op::SHA,
+        (4, 5, 3) => Op::SAX,
+        (4, 6, 3) => Op::TAX,
+        (4, 7, 3) => Op::SHA,
+
+        (5, 0, 3) => Op::LAX,
+        (5, 1, 3) => Op::LAX,
+        (5, 2, 3) => Op::LXA,
+        (5, 3, 3) => Op::LAX,
+        (5, 4, 3) => Op::LAX,
+        (5, 5, 3) => Op::LAX,
+        (5, 6, 3) => Op::LAS,
+        (5, 7, 3) => Op::LAX,
+
+        (6, 2, 3) => Op::SBX,
+        (6, _, 3) => Op::DCP,
+
+        (7, 2, 3) => Op::SBC,
+        (7, _, 3) => Op::ISC,
+
+        (_, _, 4..) | (_, 8.., _) | (8.., _, _) => unreachable!(),
+    }
+}
+fn decode_addr_mode(a: u8, b: u8, c: u8) -> AddrMode {
+    match (b, c) {
+        (0, 0) if a == 1 => AddrMode::Absolute,
+        (0, 0) if a < 4 => AddrMode::Implied,
+        (0, 0) => AddrMode::Immediate,
+        (0, 1) => AddrMode::XIndirect,
+        (0, 2) if a < 4 => AddrMode::Implied,
+        (0, 2) => AddrMode::Immediate,
+        (0, 3) => AddrMode::XIndirect,
+
+        (1, _) => AddrMode::Zero,
+
+        (2, 0) => AddrMode::Implied,
+        (2, 1) => AddrMode::Immediate,
+        (2, 2) if a < 4 => AddrMode::Accumulator,
+        (2, 2) => AddrMode::Implied,
+        (2, 3) => AddrMode::Immediate,
+
+        (3, 0) if a == 3 => AddrMode::Indirect,
+        (3, _) => AddrMode::Absolute,
+
+        (4, 0) => AddrMode::Relative,
+        (4, 1) => AddrMode::IndirectY,
+        (4, 2) => AddrMode::Implied,
+        (4, 3) => AddrMode::IndirectY,
+
+        (5, 2) if a == 4 || a == 5 => AddrMode::ZeroY,
+        (5, 3) if a == 4 || a == 5 => AddrMode::ZeroY,
+        (5, _) => AddrMode::ZeroX,
+
+        (6, 0 | 2) => AddrMode::Implied,
+        (6, 1 | 3) => AddrMode::AbsoluteY,
+
+        (7, 0 | 1) => AddrMode::AbsoluteX,
+        (7, 2 | 3) if a == 4 || a == 5 => AddrMode::AbsoluteY,
+        (7, 2 | 3) => AddrMode::AbsoluteX,
+
+        (_, 4..) | (8.., _) => unreachable!(),
     }
 }

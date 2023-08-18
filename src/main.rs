@@ -1,7 +1,8 @@
 use cpu_6502::{instruction::decode, Cpu};
 use nessy::{
-    mapper::nrom::NRom,
+    mapper::{nrom::NRom, MapperBus},
     nesbus::{CpuBus, NesBus},
+    ppu::{Ppu, PpuBus},
     rom::Rom,
 };
 
@@ -23,7 +24,7 @@ fn main() {
     }
 }
 
-fn debug(cycle: u64, cpu: &Cpu, bus: CpuBus) {
+fn debug(cycle: u64, cpu: &Cpu, bus: CpuBus, ppu: &Ppu, _ppu_bus: PpuBus, _mapper_bus: MapperBus) {
     print!("{cycle:0>3}:    ");
     print!("{} ", if bus.rst() { "RST" } else { "   " });
     print!("{} ", if bus.nmi() { "NMI" } else { "   " });
@@ -61,6 +62,9 @@ fn debug(cycle: u64, cpu: &Cpu, bus: CpuBus) {
     print!("{}", if flags.irq_disable() { "I" } else { " " });
     print!("{}", if flags.zero() { "Z" } else { " " });
     print!("{}", if flags.carry() { "C" } else { " " });
+
+    let [x, y] = ppu.dot();
+    print!("     DOT: {x:>3}|{y:<3}");
 
     println!();
 }

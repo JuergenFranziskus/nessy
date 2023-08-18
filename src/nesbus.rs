@@ -1,11 +1,19 @@
-use crate::mapper::Mapper;
+use crate::{
+    mapper::{Mapper, MapperBus},
+    ppu::{Ppu, PpuBus},
+    util::{get_flag_u8, set_flag_u8},
+};
 use cpu_6502::{Bus, Cpu};
 
 pub struct NesBus<M, D> {
     cycle: u64,
-    cpu: CpuBus,
+    cpu_bus: CpuBus,
+    ppu_bus: PpuBus,
+    mapper_bus: MapperBus,
+    ppu: Ppu,
     mapper: M,
     ram: Box<[u8; 2048]>,
+    vram: Box<[u8; 2048]>,
 
     debug_callback: D,
 }
@@ -13,71 +21,120 @@ impl<M, D> NesBus<M, D> {
     pub fn new(mapper: M, debug_callback: D) -> Self {
         Self {
             cycle: 0,
-            cpu: CpuBus::init(),
-            ram: Box::new([0; 2048]),
+            cpu_bus: CpuBus::init(),
+            ppu_bus: PpuBus::init(),
+            mapper_bus: MapperBus::init(),
+            ppu: Ppu::init(),
             mapper,
+            ram: Box::new([0; 2048]),
+            vram: Box::new([0; 2048]),
+
             debug_callback,
+        }
+    }
+}
+impl<M, D> NesBus<M, D>
+where
+    M: Mapper,
+{
+    fn cpu_cycle(&mut self) {
+        self.ppu.cycle(&mut self.ppu_bus, &mut self.cpu_bus);
+        self.mapper
+            .cycle(&mut self.mapper_bus, &mut self.cpu_bus, &mut self.ppu_bus);
+        self.update_ram();
+        self.update_vram();
+    }
+    fn ppu_cycle(&mut self) {
+        self.ppu.cycle_alone(&mut self.ppu_bus);
+        self.mapper
+            .cycle_with_ppu(&mut self.mapper_bus, &mut self.ppu_bus);
+        self.update_vram();
+    }
+
+    fn update_ram(&mut self) {
+        let addr = self.cpu_bus.address() as usize;
+        if addr < 2048 {
+            if self.cpu_bus.read() {
+                self.cpu_bus.set_data(self.ram[addr]);
+            } else {
+                self.ram[addr] = self.cpu_bus.data();
+            }
+        }
+    }
+    fn update_vram(&mut self) {
+        if !self.mapper_bus.vram_enable() {
+            return;
+        };
+        let a10 = self.mapper_bus.vram_a10();
+        let mask = 1 << 10;
+        let addr = (self.ppu_bus.address() % 0x1000) & !mask | if a10 { mask } else { 0 };
+        let addr = addr as usize;
+
+        if self.ppu_bus.read_enable() {
+            self.ppu_bus.set_data(self.vram[addr]);
+        } else if self.ppu_bus.write_enable() {
+            self.vram[addr] = self.ppu_bus.data();
         }
     }
 }
 impl<M, D> Bus for NesBus<M, D>
 where
     M: Mapper,
-    D: FnMut(u64, &Cpu, CpuBus),
+    D: FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus),
 {
     fn data(&self) -> u8 {
-        self.cpu.data()
+        self.cpu_bus.data()
     }
 
     fn rst(&self) -> bool {
-        self.cpu.rst()
+        self.cpu_bus.rst()
     }
 
     fn nmi(&self) -> bool {
-        self.cpu.nmi()
+        self.cpu_bus.nmi()
     }
 
     fn irq(&self) -> bool {
-        self.cpu.irq()
+        self.cpu_bus.irq()
     }
 
     fn not_ready(&self) -> bool {
-        self.cpu.not_ready()
+        self.cpu_bus.not_ready()
     }
 
     fn set_data(&mut self, data: u8) {
-        self.cpu.set_data(data);
+        self.cpu_bus.set_data(data);
     }
 
     fn set_address(&mut self, addr: u16) {
-        self.cpu.set_address(addr);
+        self.cpu_bus.set_address(addr);
     }
 
     fn set_read(&mut self, read: bool) {
-        self.cpu.set_read(read);
+        self.cpu_bus.set_read(read);
     }
 
     fn set_sync(&mut self, sync: bool) {
-        self.cpu.set_sync(sync);
+        self.cpu_bus.set_sync(sync);
     }
 
     fn set_halt(&mut self, halt: bool) {
-        self.cpu.set_halt(halt);
+        self.cpu_bus.set_halt(halt);
     }
 
     fn cycle(&mut self, cpu: &cpu_6502::Cpu) {
-        self.mapper.cycle(&mut self.cpu);
+        self.cpu_cycle();
+        self.ppu_cycle();
+        self.ppu_cycle();
 
-        let addr = self.cpu.address() as usize;
-        if addr < 2048 {
-            if self.cpu.read() {
-                self.cpu.set_data(self.ram[addr]);
-            } else {
-                self.ram[addr] = self.cpu.data();
-            }
-        }
-
-        (self.debug_callback)(self.cycle, cpu, self.cpu);
+        (self.debug_callback)(
+            self.cycle,
+            cpu,
+            self.cpu_bus,
+            &self.ppu,
+            self.ppu_bus,
+            self.mapper_bus,
+        );
         self.cycle += 1;
     }
 }
@@ -105,7 +162,7 @@ impl CpuBus {
     }
 
     fn get_flag(self, flag: u8) -> bool {
-        self.flags & (1 << flag) != 0
+        get_flag_u8(self.flags, flag)
     }
     pub fn rst(self) -> bool {
         self.get_flag(Self::FLAG_RST)
@@ -137,9 +194,7 @@ impl CpuBus {
     }
 
     fn set_flag(&mut self, flag: u8, value: bool) {
-        let mask = 1 << flag;
-        self.flags &= !mask;
-        self.flags |= if value { mask } else { 0 };
+        set_flag_u8(&mut self.flags, flag, value)
     }
     pub fn set_rst(&mut self, rst: bool) {
         self.set_flag(Self::FLAG_RST, rst)

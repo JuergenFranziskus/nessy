@@ -1,18 +1,20 @@
-use super::Mapper;
-use crate::{nesbus::CpuBus, rom::Rom};
+use super::{Mapper, MapperBus};
+use crate::{nesbus::CpuBus, ppu::PpuBus, rom::Rom};
 
 pub struct NRom {
     prg: Vec<u8>,
-    _chr: Vec<u8>,
+    chr: Vec<u8>,
     large_prg: bool,
+    vertical_mirror: bool,
 }
 impl NRom {
     pub fn new(rom: &Rom) -> Self {
         let large_prg = rom.prg_rom.len() > 0x4000;
         Self {
             prg: rom.prg_rom.to_vec(),
-            _chr: rom.chr_rom.to_vec(),
+            chr: rom.chr_rom.to_vec(),
             large_prg,
+            vertical_mirror: rom.header.vertical_mirroring,
         }
     }
 
@@ -28,6 +30,16 @@ impl NRom {
             cpu.set_data(self.prg[addr]);
         }
     }
+    fn handle_ppu(&mut self, bus: &mut MapperBus, ppu: &mut PpuBus) {
+        if ppu.address() < 0x2000 && ppu.read_enable() {
+            ppu.set_data(self.chr[ppu.address() as usize]);
+        }
+
+        let a10 = ppu.address() >> 10 & 1 != 0;
+        let a11 = ppu.address() >> 11 & 1 != 0;
+        bus.set_vram_a10(if self.vertical_mirror { a10 } else { a11 });
+        bus.set_vram_enable((0x2000..0x3000).contains(&ppu.address()));
+    }
 
     pub fn overwrite(&mut self, addr: u16, value: u8) {
         if addr < 0x8000 {
@@ -38,7 +50,12 @@ impl NRom {
     }
 }
 impl Mapper for NRom {
-    fn cycle(&mut self, cpu: &mut CpuBus) {
+    fn cycle(&mut self, bus: &mut super::MapperBus, cpu: &mut CpuBus, ppu: &mut PpuBus) {
         self.handle_cpu(cpu);
+        self.handle_ppu(bus, ppu);
+    }
+
+    fn cycle_with_ppu(&mut self, bus: &mut super::MapperBus, ppu: &mut PpuBus) {
+        self.handle_ppu(bus, ppu);
     }
 }

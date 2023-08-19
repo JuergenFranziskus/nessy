@@ -3,8 +3,12 @@ use crate::{
     util::{get_flag_u16, get_flag_u8, set_flag_u16, set_flag_u8},
 };
 
-const WIDTH: u16 = 241;
+const WIDTH: u16 = 341;
 const HEIGHT: u16 = 262;
+
+const SCREEN_WIDTH: usize = 256;
+const SCREEN_HEIGHT: usize = 240;
+const SCREEN_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
 
 pub struct Ppu {
     meta: Meta,
@@ -18,6 +22,10 @@ pub struct Ppu {
     oam_addr: u8,
     oam: Box<[u8; 256]>,
     palette: Box<[u8; 32]>,
+
+    shifters: Shifters,
+
+    framebuffer: Box<[u8; SCREEN_PIXELS]>,
 }
 impl Ppu {
     pub fn init() -> Self {
@@ -33,24 +41,27 @@ impl Ppu {
             oam_addr: 0,
             oam: Box::new([0; 256]),
             palette: Box::new([0; 32]),
+
+            shifters: Shifters::init(),
+            framebuffer: Box::new([0; SCREEN_PIXELS]),
         }
     }
 
     pub fn cycle(&mut self, bus: &mut PpuBus, cpu: &mut CpuBus) {
-        self.common_cycle(bus);
+        self.common_cycle(cpu, bus);
         self.handle_cpu(bus, cpu);
     }
-    pub fn cycle_alone(&mut self, bus: &mut PpuBus) {
-        self.common_cycle(bus);
+    pub fn cycle_alone(&mut self, bus: &mut PpuBus, cpu: &mut CpuBus) {
+        self.common_cycle(cpu, bus);
     }
 
-    fn common_cycle(&mut self, bus: &mut PpuBus) {
+    fn common_cycle(&mut self, cpu: &mut CpuBus, bus: &mut PpuBus) {
         self.update_data_latch(bus); // The order is important here
         self.perform_memop(bus);
 
-        // TODO: produce a pixel of video output
+        self.render(bus);
 
-        self.decide_vblank(bus);
+        self.decide_vblank(cpu);
         self.tick_counter();
     }
     fn update_data_latch(&mut self, bus: &mut PpuBus) {
@@ -67,10 +78,11 @@ impl Ppu {
     fn perform_memop(&mut self, bus: &mut PpuBus) {
         bus.set_read_enable(self.meta.read_pending());
         bus.set_write_enable(self.meta.write_pending());
+
         self.meta.set_read_pending(false);
         self.meta.set_write_pending(false);
     }
-    fn decide_vblank(&mut self, bus: &mut PpuBus) {
+    fn decide_vblank(&mut self, cpu: &mut CpuBus) {
         let start = [1, 241];
         let end = [1, 261];
 
@@ -78,9 +90,10 @@ impl Ppu {
             self.meta.set_vblank(true);
         } else if self.dot == end {
             self.meta.set_vblank(false);
+            self.meta.set_sprite_zero_hit(false);
         }
 
-        bus.set_nmi(self.meta.vblank() && self.control.nmi_enable());
+        cpu.set_nmi(self.meta.vblank() && self.control.nmi_enable());
     }
     fn tick_counter(&mut self) {
         let last = if self.meta.odd_frame() {
@@ -98,6 +111,141 @@ impl Ppu {
                 self.dot[1] += 1;
             }
         }
+    }
+
+    fn render(&mut self, bus: &mut PpuBus) {
+        if !self.mask.render_enabled() {
+            return;
+        };
+
+        match self.dot[1] {
+            0..=239 => self.visible_scanline(false, bus),
+            261 => self.visible_scanline(true, bus),
+            _ => (),
+        }
+    }
+    fn visible_scanline(&mut self, prerender: bool, bus: &mut PpuBus) {
+        match self.dot[0] {
+            0 => (),
+            1..=256 => {
+                let x = self.dot[0] - 1;
+                let step = (x % 8) as u8;
+
+                if x != 0 {
+                    self.shifters.shift();
+                }
+                if step == 0 && x != 0 {
+                    self.shifters.shift_in_tile(bus.data());
+                    self.v.increment_x();
+                }
+
+                self.fetch_background(step, bus);
+                if !prerender {
+                    self.produce_pixel();
+                }
+
+                if x == 255 {
+                    self.v.increment_y();
+                }
+            }
+            257 => self.v.copy_horizontal_bits(self.t),
+            280..=304 => {
+                if prerender {
+                    self.v.copy_vertical_bits(self.t)
+                }
+            }
+            321..=337 => self.prefetch_tiles(bus),
+            _ => (),
+        }
+    }
+
+    fn prefetch_tiles(&mut self, bus: &mut PpuBus) {
+        let step = (self.dot[0] - 321) as u8 % 8;
+
+        self.shifters.shift();
+        if step == 0 {
+            self.shifters.shift_in_tile(bus.data());
+            self.v.increment_x();
+        }
+
+        if self.dot[0] == 337 {
+            return;
+        };
+        self.fetch_background(step, bus);
+    }
+    fn fetch_background(&mut self, step: u8, bus: &mut PpuBus) {
+        match step {
+            0 => self.read(self.v.tile_address(), bus),
+            1 => (),
+            2 => {
+                self.shifters.next_name = bus.data();
+                self.read(self.v.attribute_address(), bus);
+            }
+            3 => (),
+            4 => {
+                let attribute = self.v.extract_attribute(bus.data());
+                self.shifters.next_attribute = attribute;
+                let addr = self
+                    .shifters
+                    .pattern_address(self.control.background_table(), self.v.fine_y());
+                self.read(addr, bus);
+            }
+            5 => (),
+            6 => {
+                self.shifters.next_pattern_low = bus.data();
+                let addr = self
+                    .shifters
+                    .pattern_address(self.control.background_table(), self.v.fine_y());
+                self.read(addr + 8, bus);
+            }
+            7 => (),
+            8.. => unreachable!(),
+        }
+    }
+    fn produce_pixel(&mut self) {
+        let x = self.dot()[0] as usize - 1;
+        let y = self.dot()[1] as usize;
+
+        let bg_pattern = self.shifters.pattern(self.meta.x());
+        let bg_palette = self.shifters.palette(self.meta.x());
+        let bg_opague =
+            bg_pattern != 0 && self.mask.background() && (x >= 8 || self.mask.left_background());
+        let bg_color = self.background_color(bg_palette, bg_pattern);
+
+        // TODO: Sprite rendering
+        let sp_pattern = 0;
+        let sp_palette = 0;
+        let sp_opague =
+            sp_pattern != 0 && self.mask.sprites() && (x >= 8 || self.mask.left_sprites());
+        let sp_color = self.sprite_color(sp_palette, sp_pattern);
+        let sp_zero = false;
+        let sp_priority = false;
+
+        let universal_bg = self.palette[0];
+        let (color, hit) = match (bg_opague, sp_opague) {
+            (false, false) => (universal_bg, false),
+            (true, false) => (bg_color, false),
+            (false, true) => (sp_color, false),
+            (true, true) => {
+                let color = if sp_priority { sp_color } else { bg_color };
+                (color, true)
+            }
+        };
+
+        if hit && sp_zero {
+            self.meta.set_sprite_zero_hit(true);
+        }
+
+        let index = y * SCREEN_WIDTH + x;
+        self.framebuffer[index] = color;
+    }
+    fn background_color(&self, palette: u8, pattern: u8) -> u8 {
+        let index = (palette << 2) | pattern;
+        self.palette[index as usize]
+    }
+    fn sprite_color(&self, palette: u8, pattern: u8) -> u8 {
+        let index = 16 | (palette << 2) | pattern;
+        self.palette[index as usize]
     }
 
     fn handle_cpu(&mut self, bus: &mut PpuBus, cpu: &mut CpuBus) {
@@ -167,6 +315,7 @@ impl Ppu {
                     let data = data & 0b111111;
                     self.t.0 &= 0xFF;
                     self.t.0 |= (data as u16) << 8;
+                    self.meta.set_w(true);
                 } else {
                     self.t.0 &= !0xFF;
                     self.t.0 |= data as u16;
@@ -175,10 +324,12 @@ impl Ppu {
                 }
             }
             7 => {
-                let palette = is_palette_address(addr);
-                let palette_index = normalize_palette_address(addr);
+                let v = self.v.0;
+                let palette = is_palette_address(v);
+                let palette_index = normalize_palette_address(v);
+
                 if cpu.read() {
-                    self.read(self.v.0, bus);
+                    self.read(v, bus);
                     self.meta.set_data_latch_update_pending(true);
                     if palette {
                         cpu.set_data(self.palette[palette_index]);
@@ -189,7 +340,7 @@ impl Ppu {
                     if palette {
                         self.palette[palette_index] = cpu.data();
                     } else {
-                        self.write(addr, cpu.data(), bus);
+                        self.write(v, cpu.data(), bus);
                     }
                 }
                 self.increment_v();
@@ -209,11 +360,18 @@ impl Ppu {
     }
     fn increment_v(&mut self) {
         self.v.0 += self.control.inc_amount();
-        self.v.0 &= 0x4000;
+        self.v.0 %= 0x4000;
     }
 
     pub fn dot(&self) -> [u16; 2] {
         self.dot
+    }
+    pub fn framebuffer(&self) -> &[u8; SCREEN_PIXELS] {
+        &self.framebuffer
+    }
+
+    pub fn palette(&self) -> &[u8] {
+        &*self.palette
     }
 }
 
@@ -277,7 +435,7 @@ impl PpuBus {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Meta(u16);
+struct Meta(u16);
 impl Meta {
     fn init() -> Self {
         Self(0)
@@ -312,14 +470,12 @@ impl Meta {
         self.set_flag(Self::ODD_FRAME, odd_frame);
     }
 
-    pub fn sprite_overflow(self) -> bool {
-        self.get_flag(Self::SPRITE_OVERFLOW)
-    }
-    pub fn sprite_zero_hit(self) -> bool {
-        self.get_flag(Self::SPRITE_ZERO_HIT)
-    }
     pub fn vblank(self) -> bool {
         self.get_flag(Self::VBLANK)
+    }
+
+    pub fn set_sprite_zero_hit(&mut self, hit: bool) {
+        self.set_flag(Self::SPRITE_ZERO_HIT, hit);
     }
 
     pub fn set_vblank(&mut self, blank: bool) {
@@ -365,33 +521,66 @@ impl Meta {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Control(u8);
+struct Control(u8);
 impl Control {
     pub fn init() -> Self {
         Self(0)
     }
 
+    pub fn background_table(self) -> bool {
+        get_flag_u8(self.0, Self::BACKGROUND_TABLE)
+    }
+    pub fn increment(self) -> bool {
+        get_flag_u8(self.0, Self::INCREMENT)
+    }
     pub fn nmi_enable(self) -> bool {
         get_flag_u8(self.0, Self::NMI_ENABLE)
     }
 
     pub fn inc_amount(self) -> u16 {
-        todo!()
+        if self.increment() {
+            32
+        } else {
+            1
+        }
     }
 
+    const INCREMENT: u8 = 2;
+    const BACKGROUND_TABLE: u8 = 4;
     const NMI_ENABLE: u8 = 7;
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Mask(u8);
+struct Mask(u8);
 impl Mask {
     pub fn init() -> Self {
         Self(0)
     }
+
+    fn background(self) -> bool {
+        get_flag_u8(self.0, Self::BACKGROUND)
+    }
+    fn left_background(self) -> bool {
+        get_flag_u8(self.0, Self::LEFT_BACKGROUND)
+    }
+    fn left_sprites(self) -> bool {
+        get_flag_u8(self.0, Self::LEFT_SPRITES)
+    }
+    fn sprites(self) -> bool {
+        get_flag_u8(self.0, Self::SPRITES)
+    }
+    fn render_enabled(self) -> bool {
+        self.background() || self.sprites()
+    }
+
+    const LEFT_BACKGROUND: u8 = 1;
+    const LEFT_SPRITES: u8 = 2;
+    const BACKGROUND: u8 = 3;
+    const SPRITES: u8 = 4;
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct V(u16);
+struct V(u16);
 impl V {
     fn init() -> Self {
         Self(0)
@@ -402,9 +591,6 @@ impl V {
     }
     pub fn coarse_y(self) -> u8 {
         (self.0 >> Self::COARSE_Y) as u8 & 0b11111
-    }
-    pub fn nametable(self) -> u8 {
-        (self.0 >> Self::NAMETABLE) as u8 & 0b11
     }
     pub fn fine_y(self) -> u8 {
         (self.0 >> Self::FINE_Y) as u8 & 0b111
@@ -434,22 +620,143 @@ impl V {
         self.0 |= fine_y & mask;
     }
 
+    pub fn tile_address(self) -> u16 {
+        0x2000 | (self.0 & 0x0FFF)
+    }
+    pub fn attribute_address(self) -> u16 {
+        let v = self.0;
+        0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07)
+    }
+    pub fn extract_attribute(self, byte: u8) -> [bool; 2] {
+        let x = self.coarse_x() % 4;
+        let y = self.coarse_y() % 4;
+        let right = x >= 2;
+        let down = y >= 2;
+
+        let shift = match (right, down) {
+            (false, false) => 0,
+            (true, false) => 2,
+            (false, true) => 4,
+            (true, true) => 6,
+        };
+        let bits = (byte >> shift) & 0b11;
+
+        let low = bits & 1 != 0;
+        let high = bits & 2 != 0;
+
+        [low, high]
+    }
+
+    pub fn increment_x(&mut self) {
+        if self.coarse_x() == 31 {
+            self.set_coarse_x(0);
+            self.0 ^= 0x400; // Switch horizontal nametable
+        } else {
+            self.0 += 1; // Increment coarse x
+        }
+    }
+    pub fn increment_y(&mut self) {
+        if self.fine_y() < 7 {
+            self.set_fine_y(self.fine_y() + 1);
+        } else {
+            self.set_fine_y(0);
+            if self.coarse_y() == 29 {
+                self.set_coarse_y(0);
+                self.0 ^= 0x800; // Switch vertical nametable
+            } else if self.coarse_y() == 31 {
+                self.set_coarse_y(0);
+            } else {
+                self.set_coarse_y(self.coarse_y() + 1);
+            }
+        }
+    }
+
     const COARSE_X: u16 = 0;
     const COARSE_Y: u16 = 5;
     const NAMETABLE: u16 = 10;
     const FINE_Y: u16 = 12;
+
+    fn copy_horizontal_bits(&mut self, t: V) {
+        let mask = (0b11111 << Self::COARSE_X) | (1 << Self::NAMETABLE);
+        self.0 &= !mask;
+        self.0 |= t.0 & mask;
+    }
+
+    fn copy_vertical_bits(&mut self, t: V) {
+        let mask = (0b11111 << Self::COARSE_X) | (1 << Self::NAMETABLE);
+        self.0 &= mask;
+        self.0 |= t.0 & !mask;
+    }
 }
 
 fn is_palette_address(addr: u16) -> bool {
     (0x3F00..0x4000).contains(&addr)
 }
 fn normalize_palette_address(addr: u16) -> usize {
-    let addr = (addr as usize & 0xFF) % 0x20;
+    let addr = addr as usize % 0x20;
     match addr {
         0x10 => 0x00,
         0x14 => 0x04,
         0x18 => 0x08,
         0x1C => 0x0C,
         _ => addr,
+    }
+}
+
+struct Shifters {
+    pattern: [u16; 2],
+    palette: [u8; 2],
+    attribute: [bool; 2],
+
+    next_name: u8,
+    next_attribute: [bool; 2],
+    next_pattern_low: u8,
+}
+impl Shifters {
+    fn init() -> Self {
+        Self {
+            pattern: [0; 2],
+            palette: [0; 2],
+            attribute: [false; 2],
+
+            next_name: 0,
+            next_attribute: [false; 2],
+            next_pattern_low: 0,
+        }
+    }
+
+    fn pattern_address(&self, table: bool, fine_y: u8) -> u16 {
+        let fine_y = fine_y as u16;
+        let offset = self.next_name as u16 * 16;
+        let base = if table { 0x1000 } else { 0 };
+        base + offset + fine_y
+    }
+
+    fn pattern(&self, fine_x: u8) -> u8 {
+        let fine_x = fine_x as u16;
+        let mask = 1 << (15 - fine_x);
+        let low = if self.pattern[0] & mask != 0 { 1 } else { 0 };
+        let high = if self.pattern[1] & mask != 0 { 2 } else { 0 };
+        low | high
+    }
+    fn palette(&self, fine_x: u8) -> u8 {
+        let mask = 1 << (7 - fine_x);
+        let low = if self.palette[0] & mask != 0 { 1 } else { 0 };
+        let high = if self.palette[1] & mask != 0 { 2 } else { 0 };
+        low | high
+    }
+
+    fn shift(&mut self) {
+        self.pattern[0] = self.pattern[0].wrapping_shl(1);
+        self.pattern[1] = self.pattern[1].wrapping_shl(1);
+        self.palette[0] = self.palette[0].wrapping_shl(1);
+        self.palette[1] = self.palette[1].wrapping_shl(1);
+        self.palette[0] |= self.attribute[0] as u8;
+        self.palette[1] |= self.attribute[1] as u8;
+    }
+    fn shift_in_tile(&mut self, pattern_high: u8) {
+        self.pattern[0] |= self.next_pattern_low as u16;
+        self.pattern[1] |= pattern_high as u16;
+        self.attribute = self.next_attribute;
     }
 }

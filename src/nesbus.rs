@@ -5,7 +5,7 @@ use crate::{
 };
 use cpu_6502::{Bus, Cpu};
 
-pub struct NesBus<M, D> {
+pub struct NesBus<M> {
     cycle: u64,
     cpu_bus: CpuBus,
     ppu_bus: PpuBus,
@@ -15,10 +15,13 @@ pub struct NesBus<M, D> {
     ram: Box<[u8; 2048]>,
     vram: Box<[u8; 2048]>,
 
-    debug_callback: D,
+    debug_callback: Box<dyn FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus)>,
 }
-impl<M, D> NesBus<M, D> {
-    pub fn new(mapper: M, debug_callback: D) -> Self {
+impl<M> NesBus<M> {
+    pub fn new(
+        mapper: M,
+        debug_callback: impl FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus) + 'static,
+    ) -> Self {
         Self {
             cycle: 0,
             cpu_bus: CpuBus::init(),
@@ -29,11 +32,21 @@ impl<M, D> NesBus<M, D> {
             ram: Box::new([0; 2048]),
             vram: Box::new([0; 2048]),
 
-            debug_callback,
+            debug_callback: Box::new(debug_callback) as _,
         }
     }
+
+    pub fn ppu(&self) -> &Ppu {
+        &self.ppu
+    }
+    pub fn vram(&self) -> &[u8] {
+        &*self.vram
+    }
+    pub fn cycles(&self) -> u64 {
+        self.cycle
+    }
 }
-impl<M, D> NesBus<M, D>
+impl<M> NesBus<M>
 where
     M: Mapper,
 {
@@ -45,7 +58,7 @@ where
         self.update_vram();
     }
     fn ppu_cycle(&mut self) {
-        self.ppu.cycle_alone(&mut self.ppu_bus);
+        self.ppu.cycle_alone(&mut self.ppu_bus, &mut self.cpu_bus);
         self.mapper
             .cycle_with_ppu(&mut self.mapper_bus, &mut self.ppu_bus);
         self.update_vram();
@@ -67,20 +80,20 @@ where
         };
         let a10 = self.mapper_bus.vram_a10();
         let mask = 1 << 10;
-        let addr = (self.ppu_bus.address() % 0x1000) & !mask | if a10 { mask } else { 0 };
+        let addr = ((self.ppu_bus.address() % 0x800) & !mask) | if a10 { mask } else { 0 };
         let addr = addr as usize;
 
         if self.ppu_bus.read_enable() {
             self.ppu_bus.set_data(self.vram[addr]);
-        } else if self.ppu_bus.write_enable() {
+        }
+        if self.ppu_bus.write_enable() {
             self.vram[addr] = self.ppu_bus.data();
         }
     }
 }
-impl<M, D> Bus for NesBus<M, D>
+impl<M> Bus for NesBus<M>
 where
     M: Mapper,
-    D: FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus),
 {
     fn data(&self) -> u8 {
         self.cpu_bus.data()

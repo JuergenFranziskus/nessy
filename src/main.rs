@@ -1,70 +1,155 @@
-use cpu_6502::{instruction::decode, Cpu};
+use cpu_6502::Cpu;
+use futures::executor::block_on;
 use nessy::{
     mapper::{nrom::NRom, MapperBus},
     nesbus::{CpuBus, NesBus},
     ppu::{Ppu, PpuBus},
     rom::Rom,
+    simple_debug,
+};
+use pixely::{framebuffer::Pixel, FrameBufferDesc, Pixely, PixelyDesc, WindowDesc};
+use std::{
+    io::stdout,
+    time::{Duration, Instant},
+};
+use wgpu::{
+    Adapter, Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor, PowerPreference,
+    Queue, RequestAdapterOptions,
+};
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
 };
 
 fn main() {
-    let src = std::fs::read("./test_roms/nestest.nes").unwrap();
+    let ev_loop = EventLoop::new();
+    let window = WindowBuilder::new().build(&ev_loop).unwrap();
+    let (instance, adapter, device, queue) = init_wgpu();
+    let mut pixely = Pixely::new(PixelyDesc {
+        window: WindowDesc {
+            window: &window,
+            width: window.inner_size().width as usize,
+            height: window.inner_size().height as usize,
+        },
+        buffer: FrameBufferDesc {
+            width: 256,
+            height: 240,
+        },
+        instance: &instance,
+        adapter: &adapter,
+        device: &device,
+        queue: &queue,
+    })
+    .unwrap();
+
+    let (mut cpu, mut bus) = start_nes();
+    let frame_duration = Duration::from_secs_f64(1.0 / 60.0);
+    let mut next_frame = Instant::now();
+
+    ev_loop.run(move |ev, _, cf| match ev {
+        Event::WindowEvent { event, .. } => match event {
+            WindowEvent::Resized(size) => {
+                pixely.resize_surface(size.width as usize, size.height as usize);
+            }
+            WindowEvent::CloseRequested => {
+                *cf = ControlFlow::Exit;
+            }
+            _ => (),
+        },
+        Event::MainEventsCleared => {
+            let mut remaining_cycles: u64 = 29829;
+            while remaining_cycles > 0 {
+                let start_cycle = bus.cycles();
+                cpu.exec(&mut bus);
+                let end_cycle = bus.cycles();
+                remaining_cycles = remaining_cycles.saturating_sub(end_cycle - start_cycle);
+            }
+
+            let ppu_buffer = bus.ppu().framebuffer();
+            let framebuffer = pixely.buffer_mut();
+            for y in 0..240 {
+                for x in 0..256 {
+                    let index = y * 256 + x;
+                    let color = ppu_buffer[index];
+                    let pixel = translate_color(color);
+                    framebuffer.set_pixel(x, y, pixel);
+                }
+            }
+            pixely.render(&device, &queue).unwrap();
+
+            next_frame += frame_duration;
+            let now = Instant::now();
+            if next_frame > now {
+                let sleep = next_frame - now;
+                std::thread::sleep(sleep);
+            }
+            *cf = ControlFlow::Poll;
+        }
+        _ => (),
+    })
+}
+
+fn init_wgpu() -> (Instance, Adapter, Device, Queue) {
+    let instance = Instance::new(InstanceDescriptor {
+        backends: Backends::PRIMARY,
+        dx12_shader_compiler: Default::default(),
+    });
+
+    let adapter = instance.request_adapter(&RequestAdapterOptions {
+        power_preference: PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    });
+    let adapter = block_on(adapter).unwrap();
+
+    let device = adapter.request_device(
+        &DeviceDescriptor {
+            label: None,
+            features: adapter.features(),
+            limits: adapter.limits(),
+        },
+        None,
+    );
+    let (device, queue) = block_on(device).unwrap();
+
+    (instance, adapter, device, queue)
+}
+
+fn start_nes() -> (Cpu, NesBus<NRom>) {
+    let src = std::fs::read("./roms/DonkeyKong.nes").unwrap();
     let rom = Rom::parse(&src).unwrap();
     eprintln!("{:#?}", rom.header);
     assert!(rom.header.mapper == 0);
     assert!(rom.header.submapper == 0);
-    let mut mapper = NRom::new(&rom);
-    mapper.overwrite(0xFFFC, 0x00);
-    mapper.overwrite(0xFFFD, 0xC0);
+    let mapper = NRom::new(&rom);
 
-    let mut cpu = Cpu::new();
-    let mut bus = NesBus::new(mapper, debug);
+    let cpu = Cpu::new();
+    let bus = NesBus::new(mapper, debug);
 
-    for _ in 0..9100 {
-        cpu.exec(&mut bus);
+    (cpu, bus)
+}
+
+const DEBUG: bool = false;
+fn debug(cycle: u64, cpu: &Cpu, bus: CpuBus, ppu: &Ppu, ppu_bus: PpuBus, mapper_bus: MapperBus) {
+    if !DEBUG {
+        return;
+    };
+    simple_debug(cycle, cpu, bus, ppu, ppu_bus, mapper_bus, stdout()).unwrap();
+}
+
+fn translate_color(color: u8) -> Pixel {
+    let index = color as usize * 3;
+    let r = PALETTE[index + 0];
+    let g = PALETTE[index + 1];
+    let b = PALETTE[index + 2];
+
+    Pixel {
+        red: r,
+        green: g,
+        blue: b,
+        alpha: 255,
     }
 }
 
-fn debug(cycle: u64, cpu: &Cpu, bus: CpuBus, ppu: &Ppu, _ppu_bus: PpuBus, _mapper_bus: MapperBus) {
-    print!("{cycle:0>3}:    ");
-    print!("{} ", if bus.rst() { "RST" } else { "   " });
-    print!("{} ", if bus.nmi() { "NMI" } else { "   " });
-    print!("{} ", if bus.irq() { "IRQ" } else { "   " });
-    print!("{} ", if bus.not_ready() { "   " } else { "RDY" });
-    print!("{} ", if bus.halt() { "HLT" } else { "   " });
-    print!("{} ", if bus.sync() { "SYN" } else { "   " });
-
-    print!("  ");
-    print!("{:0>4x} ", bus.address());
-    print!("{}", if bus.read() { "R" } else { " " });
-    print!("{} ", if !bus.read() { "W" } else { " " });
-    print!("{:0>2x}", bus.data());
-
-    if bus.sync() {
-        let (op, mode) = decode(bus.data());
-        print!("  {op:?} {mode:<9}");
-    } else {
-        print!("               ");
-    }
-
-    print!("    ");
-    print!("A: {:0>2x}", cpu.a());
-    print!(" | X: {:0>2x}", cpu.x());
-    print!(" | Y: {:0>2x}", cpu.y());
-    print!(" | SP: {:0>2x}", cpu.sp() & 0xFF);
-    print!(" | PC: {:0>4x}", cpu.pc());
-
-    let flags = cpu.flags();
-    print!("  ");
-    print!("{}", if flags.negative() { "N" } else { " " });
-    print!("{}", if flags.overflow() { "V" } else { " " });
-    print!("  ");
-    print!("{}", if flags.decimal() { "D" } else { " " });
-    print!("{}", if flags.irq_disable() { "I" } else { " " });
-    print!("{}", if flags.zero() { "Z" } else { " " });
-    print!("{}", if flags.carry() { "C" } else { " " });
-
-    let [x, y] = ppu.dot();
-    print!("     DOT: {x:>3}|{y:<3}");
-
-    println!();
-}
+static PALETTE: &[u8] = include_bytes!("ntscpalette.pal");

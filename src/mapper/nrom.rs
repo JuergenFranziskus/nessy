@@ -38,7 +38,9 @@ impl NRom {
         let a10 = ppu.address() >> 10 & 1 != 0;
         let a11 = ppu.address() >> 11 & 1 != 0;
         bus.set_vram_a10(if self.vertical_mirror { a10 } else { a11 });
-        bus.set_vram_enable((0x2000..0x3000).contains(&ppu.address()));
+        let enable = (0x2000..0x3000).contains(&ppu.address());
+
+        bus.set_vram_enable(enable);
     }
 
     pub fn overwrite(&mut self, addr: u16, value: u8) {

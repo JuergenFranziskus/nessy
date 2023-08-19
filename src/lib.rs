@@ -6,6 +6,7 @@ use cpu_6502::{instruction::decode, Cpu};
 use mapper::MapperBus;
 use nesbus::CpuBus;
 use ppu::{Ppu, PpuBus};
+pub mod apu;
 pub mod mapper;
 pub mod nesbus;
 pub mod ppu;
@@ -35,7 +36,7 @@ pub fn simple_debug(
     write!(out, "{} ", if !bus.read() { "W" } else { " " })?;
     write!(out, "{:0>2x}", bus.data())?;
 
-    if bus.sync() {
+    if bus.sync() && !bus.halt() {
         let (op, mode) = decode(bus.data());
         write!(out, "  {op:?} {mode:<9}")?;
     } else {

@@ -148,16 +148,24 @@ impl Ppu {
                     self.v.increment_y();
                 }
             }
-            257 => self.v.copy_horizontal_bits(self.t),
-            280..=304 => {
-                if prerender {
+            257..=320 => {
+                if self.dot[0] == 257 {
+                    self.v.copy_horizontal_bits(self.t);
+                    self.evaluate_sprites();
+                }
+                if (280..=304).contains(&self.dot[0]) && prerender {
                     self.v.copy_vertical_bits(self.t)
                 }
+
+                self.fetch_sprites(bus);
             }
             321..=337 => self.prefetch_tiles(bus),
             _ => (),
         }
     }
+
+    fn evaluate_sprites(&mut self) {}
+    fn fetch_sprites(&mut self, bus: &mut PpuBus) {}
 
     fn prefetch_tiles(&mut self, bus: &mut PpuBus) {
         let step = (self.dot[0] - 321) as u8 % 8;

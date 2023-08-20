@@ -117,7 +117,7 @@ fn init_wgpu() -> (Instance, Adapter, Device, Queue) {
 }
 
 fn start_nes() -> (Cpu, NesBus<NRom>) {
-    let src = std::fs::read("./roms/DonkeyKong.nes").unwrap();
+    let src = std::fs::read("./roms/SuperMarioBros.nes").unwrap();
     let rom = Rom::parse(&src).unwrap();
     eprintln!("{:#?}", rom.header);
     assert!(rom.header.mapper == 0);

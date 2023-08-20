@@ -24,6 +24,7 @@ pub struct Ppu {
     palette: Box<[u8; 32]>,
 
     shifters: Shifters,
+    sprites: Box<Sprites>,
 
     framebuffer: Box<[u8; SCREEN_PIXELS]>,
 }
@@ -43,6 +44,8 @@ impl Ppu {
             palette: Box::new([0; 32]),
 
             shifters: Shifters::init(),
+            sprites: Box::new(Sprites::init()),
+
             framebuffer: Box::new([0; SCREEN_PIXELS]),
         }
     }
@@ -91,6 +94,7 @@ impl Ppu {
         } else if self.dot == end {
             self.meta.set_vblank(false);
             self.meta.set_sprite_zero_hit(false);
+            self.meta.set_sprite_overflow(false);
         }
 
         cpu.set_nmi(self.meta.vblank() && self.control.nmi_enable());
@@ -159,19 +163,106 @@ impl Ppu {
 
                 self.fetch_sprites(bus);
             }
-            321..=337 => self.prefetch_tiles(bus),
+            321..=336 => {
+                if self.dot[0] == 321 {
+                    self.fetch_sprites(bus); // Final sprite pattern data is only now available
+                }
+                self.prefetch_tiles(bus);
+            }
+            337 => self.prefetch_tiles(bus), // Final pattern data is only now available
             _ => (),
         }
     }
 
-    fn evaluate_sprites(&mut self) {}
-    fn fetch_sprites(&mut self, bus: &mut PpuBus) {}
+    fn evaluate_sprites(&mut self) {
+        self.sprites.eval_index = 0;
+        self.sprites.fetch_index = 0;
+        for i in (0..256).step_by(4) {
+            self.evaluate_sprite(i);
+        }
+        while self.sprites.eval_index < 8 {
+            self.sprites.sprites[self.sprites.eval_index as usize] = Sprite::default();
+            self.sprites.eval_index += 1;
+        }
+    }
+    fn evaluate_sprite(&mut self, sprite: usize) {
+        if self.sprites.eval_index >= 8 {
+            self.meta.set_sprite_overflow(true); // Wrongly correct implementation, real hardware has bug. Important?
+            return;
+        }
+
+        let bytes = &self.oam[sprite..sprite + 4];
+        let dot = self.dot();
+        let y = bytes[0] as u16;
+        let ver_range = y..(y + 8);
+        if !ver_range.contains(&dot[1]) {
+            return;
+        };
+        let x = bytes[3];
+        let tile = bytes[1];
+        let flags = bytes[2];
+
+        let palette = flags & 0b11;
+        let priority = flags & (1 << 5) == 0;
+        let hor_flip = flags & (1 << 6) != 0;
+        let ver_flip = flags & (1 << 7) != 0;
+
+        let y_offset = (dot[1] - y) as u8;
+        let y_offset = if ver_flip { 7 - y_offset } else { y_offset };
+
+        self.sprites.sprites[self.sprites.eval_index as usize] = Sprite {
+            present: true,
+            x,
+            sprite_zero: sprite == 0,
+            priority,
+            tile,
+            y_offset,
+            hor_flip,
+            pattern: [0; 2],
+            palette,
+        };
+        self.sprites.eval_index += 1;
+    }
+    fn fetch_sprites(&mut self, bus: &mut PpuBus) {
+        let step = (self.dot[0] - 257) as u8 % 8;
+
+        match step {
+            0 => {
+                if self.dot[0] != 257 {
+                    self.sprites.fetch_high_pattern(bus.data());
+                    self.sprites.next_fetch();
+                }
+                if self.dot[0] != 321 {
+                    self.read(self.v.tile_address(), bus)
+                }
+            }
+            1 => (),
+            2 => self.read(self.v.attribute_address(), bus),
+            3 => (),
+            4 => self.read(
+                self.sprites
+                    .pattern_low_address(self.control.sprite_table()),
+                bus,
+            ),
+            5 => (),
+            6 => {
+                self.sprites.fetch_low_pattern(bus.data());
+                self.read(
+                    self.sprites
+                        .pattern_high_address(self.control.sprite_table()),
+                    bus,
+                );
+            }
+            7 => (),
+            _ => (),
+        }
+    }
 
     fn prefetch_tiles(&mut self, bus: &mut PpuBus) {
         let step = (self.dot[0] - 321) as u8 % 8;
 
         self.shifters.shift();
-        if step == 0 {
+        if step == 0 && self.dot[0] != 321 {
             self.shifters.shift_in_tile(bus.data());
             self.v.increment_x();
         }
@@ -220,14 +311,10 @@ impl Ppu {
             bg_pattern != 0 && self.mask.background() && (x >= 8 || self.mask.left_background());
         let bg_color = self.background_color(bg_palette, bg_pattern);
 
-        // TODO: Sprite rendering
-        let sp_pattern = 0;
-        let sp_palette = 0;
+        let (sp_pattern, sp_palette, sp_zero, sp_priority) = self.generate_sprite_pixel();
         let sp_opague =
             sp_pattern != 0 && self.mask.sprites() && (x >= 8 || self.mask.left_sprites());
         let sp_color = self.sprite_color(sp_palette, sp_pattern);
-        let sp_zero = false;
-        let sp_priority = false;
 
         let universal_bg = self.palette[0];
         let (color, hit) = match (bg_opague, sp_opague) {
@@ -246,6 +333,41 @@ impl Ppu {
 
         let index = y * SCREEN_WIDTH + x;
         self.framebuffer[index] = color;
+    }
+    fn generate_sprite_pixel(&self) -> (u8, u8, bool, bool) {
+        for sprite in &self.sprites.sprites {
+            if !sprite.present {
+                continue;
+            };
+            let x = self.dot[0] - 1;
+            let sp_x = sprite.x as u16;
+            let hor_range = sp_x..sp_x + 8;
+            if !hor_range.contains(&x) {
+                continue;
+            };
+            let offset = (x - sp_x) as u8;
+            let offset = if !sprite.hor_flip { 7 - offset } else { offset };
+            let pattern_low = if sprite.pattern[0] & (1 << offset) != 0 {
+                1
+            } else {
+                0
+            };
+            let pattern_high = if sprite.pattern[1] & (1 << offset) != 0 {
+                2
+            } else {
+                0
+            };
+            let pattern = pattern_low | pattern_high;
+            if pattern == 0 {
+                continue;
+            };
+            let palette = sprite.palette;
+            let zero = sprite.sprite_zero;
+            let priority = sprite.priority;
+            return (pattern, palette, zero, priority);
+        }
+
+        (0, 0, false, false)
     }
     fn background_color(&self, palette: u8, pattern: u8) -> u8 {
         let index = (palette << 2) | pattern;
@@ -526,6 +648,10 @@ impl Meta {
     const READ_PENDING: u16 = 8;
     const WRITE_PENDING: u16 = 9;
     const DATA_LATCH_UPDATE_PENDING: u16 = 10;
+
+    pub fn set_sprite_overflow(&mut self, overflow: bool) {
+        self.set_flag(Self::SPRITE_OVERFLOW, overflow);
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -554,8 +680,13 @@ impl Control {
     }
 
     const INCREMENT: u8 = 2;
+    const SPRITE_TABLE: u8 = 3;
     const BACKGROUND_TABLE: u8 = 4;
     const NMI_ENABLE: u8 = 7;
+
+    pub fn sprite_table(&self) -> bool {
+        get_flag_u8(self.0, Self::SPRITE_TABLE)
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -766,5 +897,72 @@ impl Shifters {
         self.pattern[0] |= self.next_pattern_low as u16;
         self.pattern[1] |= pattern_high as u16;
         self.attribute = self.next_attribute;
+    }
+}
+
+struct Sprites {
+    sprites: [Sprite; 8],
+    fetch_index: u8,
+    eval_index: u8,
+}
+impl Sprites {
+    fn init() -> Sprites {
+        Sprites {
+            sprites: Default::default(),
+            fetch_index: 0,
+            eval_index: 0,
+        }
+    }
+
+    fn pattern_low_address(&self, table: bool) -> u16 {
+        let i = self.fetch_index as usize;
+        let tile = self.sprites[i].tile as u16;
+        let offset = tile * 16;
+        let base = if table { 0x1000 } else { 0 };
+        base + offset + self.sprites[i].y_offset as u16
+    }
+    fn pattern_high_address(&self, table: bool) -> u16 {
+        self.pattern_low_address(table) + 8
+    }
+
+    fn fetch_low_pattern(&mut self, pattern: u8) {
+        let i = self.fetch_index as usize;
+        let sprite = &mut self.sprites[i];
+        sprite.pattern[0] = if sprite.present { pattern } else { 0 };
+    }
+    fn fetch_high_pattern(&mut self, pattern: u8) {
+        let i = self.fetch_index as usize;
+        let sprite = &mut self.sprites[i];
+        sprite.pattern[1] = if sprite.present { pattern } else { 0 };
+    }
+    fn next_fetch(&mut self) {
+        self.fetch_index += 1;
+    }
+}
+
+struct Sprite {
+    present: bool,
+    x: u8,
+    sprite_zero: bool,
+    priority: bool,
+    tile: u8,
+    y_offset: u8,
+    hor_flip: bool,
+    pattern: [u8; 2],
+    palette: u8,
+}
+impl Default for Sprite {
+    fn default() -> Self {
+        Self {
+            present: false,
+            x: 0,
+            sprite_zero: false,
+            priority: false,
+            tile: 0xFF,
+            y_offset: 0,
+            hor_flip: false,
+            pattern: [0; 2],
+            palette: 0,
+        }
     }
 }

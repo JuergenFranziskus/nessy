@@ -30,8 +30,7 @@ impl Apu {
 struct Dma {
     put_cycle: bool,
 
-    oam_dma: bool,
-    oam_data_valid: bool,
+    oam_dma: OamDma,
     oam_page: u8,
     oam_step: u8,
 }
@@ -40,43 +39,44 @@ impl Dma {
         Self {
             put_cycle: false,
 
-            oam_dma: false,
-            oam_data_valid: false,
+            oam_dma: OamDma::Idle,
             oam_page: 0,
             oam_step: 0,
         }
     }
 
     fn perform_dma(&mut self, cpu: &mut CpuBus) {
-        cpu.set_not_ready(self.oam_dma);
-        if !self.oam_dma {
-            return;
-        };
-        if !cpu.halt() {
-            return;
-        };
-
-        if self.put_cycle {
-            if !self.oam_data_valid {
-                return;
-            };
-            cpu.set_read(false);
-            cpu.set_address(0x2004);
-            self.oam_step = self.oam_step.wrapping_add(1);
-            if self.oam_step == 0 {
-                self.oam_dma = false;
+        match self.oam_dma {
+            OamDma::Idle => cpu.set_not_ready(false),
+            OamDma::Started => {
+                cpu.set_not_ready(true);
+                if !cpu.halt() {
+                    return;
+                };
+                if self.put_cycle {
+                    return;
+                };
+                cpu.set_read(true);
+                cpu.set_address(self.oam_addr());
+                self.oam_dma = OamDma::ToWrite;
             }
-        } else {
-            let addr = (self.oam_page as u16) << 8 | (self.oam_step as u16);
-            cpu.set_read(true);
-            cpu.set_address(addr);
-            self.oam_data_valid = true;
+            OamDma::ToWrite => {
+                cpu.set_read(false);
+                cpu.set_address(0x2004);
+                let done = self.oam_step == 255;
+                self.oam_dma = if done { OamDma::Idle } else { OamDma::ToRead };
+                self.oam_step = self.oam_step.wrapping_add(1);
+            }
+            OamDma::ToRead => {
+                cpu.set_address(self.oam_addr());
+                cpu.set_read(true);
+                self.oam_dma = OamDma::ToWrite;
+            }
         }
     }
 
     fn start_oam_dma(&mut self, page: u8) {
-        self.oam_dma = true;
-        self.oam_data_valid = false;
+        self.oam_dma = OamDma::Started;
         self.oam_page = page;
         self.oam_step = 0;
     }
@@ -84,4 +84,17 @@ impl Dma {
     fn tick_counters(&mut self) {
         self.put_cycle = !self.put_cycle
     }
+
+    fn oam_addr(&self) -> u16 {
+        let low = self.oam_step as u16;
+        let high = (self.oam_page as u16) << 8;
+        low | high
+    }
+}
+
+enum OamDma {
+    Idle,
+    Started,
+    ToRead,
+    ToWrite,
 }

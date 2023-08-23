@@ -147,6 +147,7 @@ where
     }
 
     fn cycle(&mut self, cpu: &cpu_6502::Cpu) {
+        self.cpu_bus.set_irq(false);
         self.cpu_cycle();
         self.ppu_cycle();
         self.ppu_cycle();
@@ -240,6 +241,11 @@ impl CpuBus {
     }
     pub fn set_halt(&mut self, halt: bool) {
         self.set_flag(Self::FLAG_HALT, halt)
+    }
+
+    pub fn or_irq(&mut self, irq: bool) {
+        let old = self.irq();
+        self.set_irq(old | irq);
     }
 
     const FLAG_RST: u8 = 0;

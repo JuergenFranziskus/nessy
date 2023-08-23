@@ -1,6 +1,7 @@
 use cpu_6502::Cpu;
 use futures::executor::block_on;
 use nessy::{
+    input::Controller,
     mapper::{nrom::NRom, MapperBus},
     nesbus::{CpuBus, NesBus},
     ppu::{Ppu, PpuBus},
@@ -17,7 +18,7 @@ use wgpu::{
     Queue, RequestAdapterOptions,
 };
 use winit::{
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
@@ -55,6 +56,7 @@ fn main() {
             WindowEvent::CloseRequested => {
                 *cf = ControlFlow::Exit;
             }
+            WindowEvent::KeyboardInput { input, .. } => handle_keyboard(&mut bus, input),
             _ => (),
         },
         Event::MainEventsCleared => {
@@ -88,6 +90,32 @@ fn main() {
         }
         _ => (),
     })
+}
+
+fn handle_keyboard<O>(bus: &mut NesBus<O>, input: winit::event::KeyboardInput) {
+    let Some(keycode) = input.virtual_keycode else {
+        return;
+    };
+    let function = match keycode {
+        VirtualKeyCode::I => Controller::set_up,
+        VirtualKeyCode::K => Controller::set_down,
+        VirtualKeyCode::J => Controller::set_left,
+        VirtualKeyCode::L => Controller::set_right,
+        VirtualKeyCode::D => Controller::set_a,
+        VirtualKeyCode::F => Controller::set_b,
+        VirtualKeyCode::S => Controller::set_select,
+        VirtualKeyCode::Return => Controller::set_start,
+        _ => return,
+    };
+
+    let state = match input.state {
+        ElementState::Pressed => true,
+        ElementState::Released => false,
+    };
+
+    let input = bus.input_mut();
+    let controller = input.controller_mut(0);
+    function(controller, state);
 }
 
 fn init_wgpu() -> (Instance, Adapter, Device, Queue) {

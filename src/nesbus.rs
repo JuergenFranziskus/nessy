@@ -1,5 +1,6 @@
 use crate::{
     apu::Apu,
+    input::Input,
     mapper::{Mapper, MapperBus},
     ppu::{Ppu, PpuBus},
     util::{get_flag_u8, set_flag_u8},
@@ -14,6 +15,7 @@ pub struct NesBus<M> {
     apu: Apu,
     ppu: Ppu,
     mapper: M,
+    input: Input,
     ram: Box<[u8; 2048]>,
     vram: Box<[u8; 2048]>,
 
@@ -32,6 +34,7 @@ impl<M> NesBus<M> {
             apu: Apu::init(),
             ppu: Ppu::init(),
             mapper,
+            input: Input::init(),
             ram: Box::new([0; 2048]),
             vram: Box::new([0; 2048]),
 
@@ -41,6 +44,9 @@ impl<M> NesBus<M> {
 
     pub fn ppu(&self) -> &Ppu {
         &self.ppu
+    }
+    pub fn input_mut(&mut self) -> &mut Input {
+        &mut self.input
     }
     pub fn vram(&self) -> &[u8] {
         &*self.vram
@@ -58,6 +64,7 @@ where
         self.ppu.cycle(&mut self.ppu_bus, &mut self.cpu_bus);
         self.mapper
             .cycle(&mut self.mapper_bus, &mut self.cpu_bus, &mut self.ppu_bus);
+        self.input.cycle(&mut self.cpu_bus);
         self.update_ram();
         self.update_vram();
     }

@@ -7,6 +7,7 @@ use mapper::MapperBus;
 use nesbus::CpuBus;
 use ppu::{Ppu, PpuBus};
 pub mod apu;
+pub mod input;
 pub mod mapper;
 pub mod nesbus;
 pub mod ppu;

@@ -1,13 +1,13 @@
 use super::{Mapper, MapperBus};
 use crate::{nesbus::CpuBus, ppu::PpuBus, rom::Rom};
 
-pub struct NRom {
+pub struct Mapper0 {
     prg: Vec<u8>,
     chr: Vec<u8>,
     large_prg: bool,
     vertical_mirror: bool,
 }
-impl NRom {
+impl Mapper0 {
     pub fn new(rom: &Rom) -> Self {
         let large_prg = rom.prg_rom.len() > 0x4000;
         Self {
@@ -51,7 +51,7 @@ impl NRom {
         self.prg[addr as usize] = value;
     }
 }
-impl Mapper for NRom {
+impl Mapper for Mapper0 {
     fn cycle(&mut self, bus: &mut super::MapperBus, cpu: &mut CpuBus, ppu: &mut PpuBus) {
         self.handle_cpu(cpu);
         self.handle_ppu(bus, ppu);

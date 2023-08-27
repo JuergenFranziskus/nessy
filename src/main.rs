@@ -1,8 +1,9 @@
+use cpu_6502::Bus;
 use cpu_6502::Cpu;
 use futures::executor::block_on;
 use nessy::{
     input::Controller,
-    mapper::{nrom::NRom, MapperBus},
+    mapper::{get_mapper, DynMapper, MapperBus},
     nesbus::{CpuBus, NesBus},
     ppu::{Ppu, PpuBus},
     rom::Rom,
@@ -22,7 +23,6 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-use cpu_6502::Bus;
 
 fn main() {
     let ev_loop = EventLoop::new();
@@ -47,7 +47,7 @@ fn main() {
 
     let (mut cpu, mut bus) = start_nes();
     let mut last_nmi = false;
-    
+
     let frame_duration = Duration::from_secs_f64(1.0 / 60.0);
     let mut next_frame = Instant::now();
 
@@ -68,7 +68,9 @@ fn main() {
                 let nmi = bus.nmi();
                 let quit = nmi && !last_nmi;
                 last_nmi = nmi;
-                if quit { break };
+                if quit {
+                    break;
+                };
             }
 
             let ppu_buffer = bus.ppu().framebuffer();
@@ -147,13 +149,11 @@ fn init_wgpu() -> (Instance, Adapter, Device, Queue) {
     (instance, adapter, device, queue)
 }
 
-fn start_nes() -> (Cpu, NesBus<NRom>) {
+fn start_nes() -> (Cpu, NesBus<DynMapper>) {
     let src = std::fs::read("./roms/SuperMarioBros.nes").unwrap();
     let rom = Rom::parse(&src).unwrap();
     eprintln!("{:#?}", rom.header);
-    assert!(rom.header.mapper == 0);
-    assert!(rom.header.submapper == 0);
-    let mapper = NRom::new(&rom);
+    let mapper = get_mapper(&rom);
 
     let cpu = Cpu::new();
     let bus = NesBus::new(mapper, debug);

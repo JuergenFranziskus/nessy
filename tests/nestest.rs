@@ -1,6 +1,6 @@
 use cpu_6502::Cpu;
 use nessy::{
-    mapper::{nrom::NRom, MapperBus},
+    mapper::{mapper0::Mapper0, MapperBus},
     nesbus::{CpuBus, NesBus},
     ppu::{Ppu, PpuBus},
     rom::Rom,
@@ -19,7 +19,7 @@ pub fn nestest() {
 
     let src = fs::read("test_roms/nestest.nes").unwrap();
     let rom = Rom::parse(&src).unwrap();
-    let mut mapper = NRom::new(&rom);
+    let mut mapper = Mapper0::new(&rom);
     mapper.overwrite(0xFFFC, 0x00);
     mapper.overwrite(0xFFFD, 0xC0);
 
@@ -53,7 +53,7 @@ fn dummy_debug(
     simple_debug(cycle, cpu, bus, ppu, ppu_bus, mapper_bus, stderr()).unwrap();
 }
 
-fn compare_state(line: &str, cpu: &Cpu, bus: &NesBus<NRom>) {
+fn compare_state(line: &str, cpu: &Cpu, bus: &NesBus<Mapper0>) {
     let should_pc = u16::from_str_radix(&line[0..4], 16).unwrap();
     let should_a = u8::from_str_radix(&line[50..52], 16).unwrap();
     let should_x = u8::from_str_radix(&line[55..57], 16).unwrap();

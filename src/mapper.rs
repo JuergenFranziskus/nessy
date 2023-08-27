@@ -1,10 +1,13 @@
+use self::{mapper0::Mapper0, mapper2::Mapper2};
 use crate::{
     nesbus::CpuBus,
     ppu::PpuBus,
+    rom::Rom,
     util::{get_flag_u8, set_flag_u8},
 };
 
-pub mod nrom;
+pub mod mapper0;
+pub mod mapper2;
 
 pub trait Mapper {
     fn cycle(&mut self, bus: &mut MapperBus, cpu: &mut CpuBus, ppu: &mut PpuBus);
@@ -49,4 +52,29 @@ impl MapperBus {
     const VRAM_ENABLE: u8 = 0;
     const VRAM_A10: u8 = 1;
     const IRQ: u8 = 2;
+}
+
+pub struct DynMapper(Box<dyn Mapper>);
+impl DynMapper {
+    pub fn new(mapper: impl Mapper + 'static) -> Self {
+        Self(Box::new(mapper))
+    }
+}
+impl Mapper for DynMapper {
+    fn cycle(&mut self, bus: &mut MapperBus, cpu: &mut CpuBus, ppu: &mut PpuBus) {
+        self.0.cycle(bus, cpu, ppu);
+    }
+
+    fn cycle_with_ppu(&mut self, bus: &mut MapperBus, ppu: &mut PpuBus) {
+        self.0.cycle_with_ppu(bus, ppu);
+    }
+}
+
+pub fn get_mapper(rom: &Rom) -> DynMapper {
+    let mapper = rom.header.mapper;
+    match rom.header.mapper {
+        0 => DynMapper::new(Mapper0::new(rom)),
+        2 => DynMapper::new(Mapper2::new(rom)),
+        _ => unimplemented!("Mapper {mapper} is not implemented"),
+    }
 }

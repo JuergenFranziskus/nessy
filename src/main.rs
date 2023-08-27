@@ -150,7 +150,7 @@ fn init_wgpu() -> (Instance, Adapter, Device, Queue) {
 }
 
 fn start_nes() -> (Cpu, NesBus<DynMapper>) {
-    let src = std::fs::read("./roms/SuperMarioBros.nes").unwrap();
+    let src = std::fs::read("./roms/DoubleDribble.nes").unwrap();
     let rom = Rom::parse(&src).unwrap();
     eprintln!("{:#?}", rom.header);
     let mapper = get_mapper(&rom);

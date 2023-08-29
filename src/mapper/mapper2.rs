@@ -7,11 +7,14 @@ pub struct Mapper2 {
     banks: u8,
     bank: u8,
     vertical_mirror: bool,
+    bank_conflicts: bool,
 }
 impl Mapper2 {
     pub fn new(rom: &Rom) -> Self {
         let banks = rom.header.prg_rom_size / 16384;
         let bank = 0;
+
+        let bank_conflicts = rom.header.submapper == 2;
 
         let ret = Self {
             prg: rom.prg_rom.to_vec(),
@@ -19,6 +22,7 @@ impl Mapper2 {
             banks: banks as u8,
             bank,
             vertical_mirror: rom.header.vertical_mirroring,
+            bank_conflicts,
         };
 
         ret
@@ -32,7 +36,13 @@ impl Mapper2 {
             let addr = self.prg_rom_address(cpu.address());
             cpu.set_data(self.prg[addr]);
         } else {
-            self.bank = cpu.data();
+            if self.bank_conflicts {
+                let addr = self.prg_rom_address(cpu.address());
+                let rom_data = self.prg[addr];
+                self.bank = rom_data & cpu.data();
+            } else {
+                self.bank = cpu.data();
+            }
         }
     }
     fn handle_ppu(&mut self, bus: &mut MapperBus, ppu: &mut PpuBus) {

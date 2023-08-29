@@ -54,9 +54,9 @@ impl MapperBus {
     const IRQ: u8 = 2;
 }
 
-pub struct DynMapper(Box<dyn Mapper>);
+pub struct DynMapper(Box<dyn Mapper + Send>);
 impl DynMapper {
-    pub fn new(mapper: impl Mapper + 'static) -> Self {
+    pub fn new(mapper: impl Mapper + Send + 'static) -> Self {
         Self(Box::new(mapper))
     }
 }

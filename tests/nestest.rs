@@ -1,14 +1,17 @@
 use cpu_6502::Cpu;
 use nessy::{
+    input::Controller,
     mapper::{mapper0::Mapper0, MapperBus},
     nesbus::{CpuBus, NesBus},
-    ppu::{Ppu, PpuBus},
+    ppu::{Ppu, PpuBus, SCREEN_PIXELS},
     rom::Rom,
     simple_debug,
 };
+use parking_lot::Mutex;
 use std::{
     fs::{self, File},
     io::{stderr, BufRead, BufReader},
+    sync::Arc,
 };
 
 #[test]
@@ -23,8 +26,12 @@ pub fn nestest() {
     mapper.overwrite(0xFFFC, 0x00);
     mapper.overwrite(0xFFFD, 0xC0);
 
+    let framebuffer = Arc::new(Mutex::new([0; SCREEN_PIXELS]));
+    let input_0 = Arc::new(Mutex::new(Controller(0)));
+    let input_1 = Arc::new(Mutex::new(Controller(0)));
+
     let mut cpu = Cpu::new();
-    let mut bus = NesBus::new(mapper, dummy_debug);
+    let mut bus = NesBus::new(mapper, framebuffer, [input_0, input_1], dummy_debug);
 
     // Run reset sequence
     cpu.exec(&mut bus);

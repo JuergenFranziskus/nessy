@@ -1,11 +1,15 @@
+use std::sync::Arc;
+
 use crate::{
     apu::Apu,
-    input::Input,
+    input::{Controller, Input},
     mapper::{Mapper, MapperBus},
-    ppu::{Ppu, PpuBus},
+    ppu::{Ppu, PpuBus, SCREEN_PIXELS},
     util::{get_flag_u8, set_flag_u8},
 };
 use cpu_6502::{Bus, Cpu};
+
+use parking_lot::Mutex;
 
 pub struct NesBus<M> {
     cycle: u64,
@@ -19,12 +23,14 @@ pub struct NesBus<M> {
     ram: Box<[u8; 2048]>,
     vram: Box<[u8; 2048]>,
 
-    debug_callback: Box<dyn FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus)>,
+    debug_callback: Box<dyn FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus) + Send>,
 }
 impl<M> NesBus<M> {
     pub fn new(
         mapper: M,
-        debug_callback: impl FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus) + 'static,
+        framebuffer: Arc<Mutex<[u8; SCREEN_PIXELS]>>,
+        controller_inputs: [Arc<Mutex<Controller>>; 2],
+        debug_callback: impl FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus) + Send + 'static,
     ) -> Self {
         Self {
             cycle: 0,
@@ -32,9 +38,9 @@ impl<M> NesBus<M> {
             ppu_bus: PpuBus::init(),
             mapper_bus: MapperBus::init(),
             apu: Apu::init(),
-            ppu: Ppu::init(),
+            ppu: Ppu::init(framebuffer),
             mapper,
-            input: Input::init(),
+            input: Input::init(controller_inputs),
             ram: Box::new([0; 2048]),
             vram: Box::new([0; 2048]),
 
@@ -44,6 +50,9 @@ impl<M> NesBus<M> {
 
     pub fn ppu(&self) -> &Ppu {
         &self.ppu
+    }
+    pub fn apu(&self) -> &Apu {
+        &self.apu
     }
     pub fn input_mut(&mut self) -> &mut Input {
         &mut self.input

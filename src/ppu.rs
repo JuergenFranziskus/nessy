@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
 use crate::{
     nesbus::CpuBus,
     util::{get_flag_u16, get_flag_u8, set_flag_u16, set_flag_u8},
@@ -6,9 +10,9 @@ use crate::{
 const WIDTH: u16 = 341;
 const HEIGHT: u16 = 262;
 
-const SCREEN_WIDTH: usize = 256;
-const SCREEN_HEIGHT: usize = 240;
-const SCREEN_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
+pub const SCREEN_WIDTH: usize = 256;
+pub const SCREEN_HEIGHT: usize = 240;
+pub const SCREEN_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
 
 pub struct Ppu {
     meta: Meta,
@@ -26,10 +30,11 @@ pub struct Ppu {
     shifters: Shifters,
     sprites: Box<Sprites>,
 
-    framebuffer: Box<[u8; SCREEN_PIXELS]>,
+    staging_buffer: Box<[u8; SCREEN_PIXELS]>,
+    framebuffer: Arc<Mutex<[u8; SCREEN_PIXELS]>>,
 }
 impl Ppu {
-    pub fn init() -> Self {
+    pub fn init(framebuffer: Arc<Mutex<[u8; SCREEN_PIXELS]>>) -> Self {
         Self {
             meta: Meta::init(),
             control: Control::init(),
@@ -46,7 +51,8 @@ impl Ppu {
             shifters: Shifters::init(),
             sprites: Box::new(Sprites::init()),
 
-            framebuffer: Box::new([0; SCREEN_PIXELS]),
+            staging_buffer: Box::new([0; SCREEN_PIXELS]),
+            framebuffer,
         }
     }
 
@@ -91,6 +97,7 @@ impl Ppu {
 
         if self.dot == start {
             self.meta.set_vblank(true);
+            self.update_framebuffer();
         } else if self.dot == end {
             self.meta.set_vblank(false);
             self.meta.set_sprite_zero_hit(false);
@@ -98,6 +105,10 @@ impl Ppu {
         }
 
         cpu.set_nmi(self.meta.vblank() && self.control.nmi_enable());
+    }
+    fn update_framebuffer(&mut self) {
+        let mut buffer = self.framebuffer.lock();
+        buffer.clone_from(&self.staging_buffer);
     }
     fn tick_counter(&mut self) {
         let last = if self.meta.odd_frame() {
@@ -331,8 +342,8 @@ impl Ppu {
             self.meta.set_sprite_zero_hit(true);
         }
 
-        let index = y * SCREEN_WIDTH + x;
-        self.framebuffer[index] = color;
+        let i = y * SCREEN_WIDTH + x;
+        self.staging_buffer[i] = color;
     }
     fn generate_sprite_pixel(&self) -> (u8, u8, bool, bool) {
         for sprite in &self.sprites.sprites {
@@ -496,10 +507,6 @@ impl Ppu {
     pub fn dot(&self) -> [u16; 2] {
         self.dot
     }
-    pub fn framebuffer(&self) -> &[u8; SCREEN_PIXELS] {
-        &self.framebuffer
-    }
-
     pub fn palette(&self) -> &[u8] {
         &*self.palette
     }

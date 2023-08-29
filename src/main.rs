@@ -1,6 +1,16 @@
-use cpu_6502::Bus;
+use cpal::traits::DeviceTrait;
+use cpal::traits::HostTrait;
+use cpal::traits::StreamTrait;
+use cpal::Host;
+use cpal::SampleFormat;
+use cpal::Stream;
+use cpal::SupportedStreamConfigRange;
 use cpu_6502::Cpu;
 use futures::executor::block_on;
+use nessy::mapper::Mapper;
+use nessy::ppu::SCREEN_HEIGHT;
+use nessy::ppu::SCREEN_PIXELS;
+use nessy::ppu::SCREEN_WIDTH;
 use nessy::{
     input::Controller,
     mapper::{get_mapper, DynMapper, MapperBus},
@@ -9,7 +19,13 @@ use nessy::{
     rom::Rom,
     simple_debug,
 };
+use parking_lot::Mutex;
+use pixely::framebuffer::FrameBuffer;
 use pixely::{framebuffer::Pixel, FrameBufferDesc, Pixely, PixelyDesc, WindowDesc};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::{
     io::stdout,
     time::{Duration, Instant},
@@ -35,8 +51,8 @@ fn main() {
             height: window.inner_size().height as usize,
         },
         buffer: FrameBufferDesc {
-            width: 256,
-            height: 240,
+            width: SCREEN_WIDTH,
+            height: SCREEN_HEIGHT,
         },
         instance: &instance,
         adapter: &adapter,
@@ -45,8 +61,14 @@ fn main() {
     })
     .unwrap();
 
-    let (mut cpu, mut bus) = start_nes();
-    let mut last_nmi = false;
+    let (host, audio_device) = init_audio();
+
+    let (cpu, bus, framebuffer, ctrl_inputs) = start_nes();
+    let running = Arc::new(AtomicBool::new(true));
+    let sound_stream = start_audio_stream(&audio_device, &bus);
+    sound_stream.play().unwrap();
+
+    let mut emu_thread = Some(start_emu_thread(cpu, bus, Arc::clone(&running)));
 
     let frame_duration = Duration::from_secs_f64(1.0 / 60.0);
     let mut next_frame = Instant::now();
@@ -59,45 +81,40 @@ fn main() {
             WindowEvent::CloseRequested => {
                 *cf = ControlFlow::Exit;
             }
-            WindowEvent::KeyboardInput { input, .. } => handle_keyboard(&mut bus, input),
+            WindowEvent::KeyboardInput { input, .. } => handle_keyboard(&ctrl_inputs, input),
             _ => (),
         },
         Event::MainEventsCleared => {
-            loop {
-                cpu.exec(&mut bus);
-                let nmi = bus.nmi();
-                let quit = nmi && !last_nmi;
-                last_nmi = nmi;
-                if quit {
-                    break;
-                };
-            }
+            let buffer = framebuffer.lock();
+            update_framebuffer(&buffer, pixely.buffer_mut());
+            drop(buffer);
 
-            let ppu_buffer = bus.ppu().framebuffer();
-            let framebuffer = pixely.buffer_mut();
-            for y in 0..240 {
-                for x in 0..256 {
-                    let index = y * 256 + x;
-                    let color = ppu_buffer[index];
-                    let pixel = translate_color(color);
-                    framebuffer.set_pixel(x, y, pixel);
-                }
-            }
             pixely.render(&device, &queue).unwrap();
 
             next_frame += frame_duration;
             let now = Instant::now();
-            if next_frame > now {
-                let sleep = next_frame - now;
-                std::thread::sleep(sleep);
+            if now < next_frame {
+                spin_sleep::sleep(next_frame - now);
             }
             *cf = ControlFlow::Poll;
+        }
+        Event::LoopDestroyed => {
+            sound_stream.pause().unwrap();
+            let Some(handle) = emu_thread.take() else {
+                unreachable!()
+            };
+            running.store(false, Ordering::Relaxed);
+            handle.join().unwrap();
+
+            // Mention the host so it gets moved into the closure and dropped properly.
+            // Since the ev_loop hijacks the main thread, everything outside the closure doesn't get dropped.
+            let _id = host.id();
         }
         _ => (),
     })
 }
 
-fn handle_keyboard<O>(bus: &mut NesBus<O>, input: winit::event::KeyboardInput) {
+fn handle_keyboard(inputs: &[Arc<Mutex<Controller>>; 2], input: winit::event::KeyboardInput) {
     let Some(keycode) = input.virtual_keycode else {
         return;
     };
@@ -118,9 +135,16 @@ fn handle_keyboard<O>(bus: &mut NesBus<O>, input: winit::event::KeyboardInput) {
         ElementState::Released => false,
     };
 
-    let input = bus.input_mut();
-    let controller = input.controller_mut(0);
-    function(controller, state);
+    function(&mut inputs[0].lock(), state);
+}
+fn update_framebuffer(ppu_buffer: &[u8; SCREEN_PIXELS], framebuffer: &mut FrameBuffer) {
+    for y in 0..SCREEN_HEIGHT {
+        for x in 0..SCREEN_WIDTH {
+            let i = y * SCREEN_WIDTH + x;
+            let color = translate_color(ppu_buffer[i]);
+            framebuffer.set_pixel(x, y, color);
+        }
+    }
 }
 
 fn init_wgpu() -> (Instance, Adapter, Device, Queue) {
@@ -148,17 +172,109 @@ fn init_wgpu() -> (Instance, Adapter, Device, Queue) {
 
     (instance, adapter, device, queue)
 }
+fn init_audio() -> (Host, cpal::Device) {
+    let host = cpal::default_host();
+    let device = host.default_output_device().unwrap();
+    (host, device)
+}
 
-fn start_nes() -> (Cpu, NesBus<DynMapper>) {
-    let src = std::fs::read("./roms/DoubleDribble.nes").unwrap();
+fn start_nes() -> (
+    Cpu,
+    NesBus<DynMapper>,
+    Arc<Mutex<[u8; SCREEN_PIXELS]>>,
+    [Arc<Mutex<Controller>>; 2],
+) {
+    let src = std::fs::read("./roms/SuperMarioBros.nes").unwrap();
     let rom = Rom::parse(&src).unwrap();
     eprintln!("{:#?}", rom.header);
     let mapper = get_mapper(&rom);
 
-    let cpu = Cpu::new();
-    let bus = NesBus::new(mapper, debug);
+    let framebuffer = Arc::new(Mutex::new([0; SCREEN_PIXELS]));
+    let rec_ctrl_0 = Arc::new(Mutex::new(Controller(0)));
+    let rec_ctrl_1 = Arc::new(Mutex::new(Controller(0)));
 
-    (cpu, bus)
+    let cpu = Cpu::new();
+    let bus = NesBus::new(
+        mapper,
+        Arc::clone(&framebuffer),
+        [Arc::clone(&rec_ctrl_0), Arc::clone(&rec_ctrl_1)],
+        debug,
+    );
+
+    (cpu, bus, framebuffer, [rec_ctrl_0, rec_ctrl_1])
+}
+fn start_audio_stream(out: &cpal::Device, bus: &NesBus<impl Mapper>) -> Stream {
+    let samples = Arc::clone(bus.apu().samples());
+
+    let configs = out.supported_output_configs().unwrap();
+    let config = configs
+        .max_by(SupportedStreamConfigRange::cmp_default_heuristics)
+        .unwrap();
+    assert_eq!(config.sample_format(), SampleFormat::F32);
+    let config = config.with_max_sample_rate().config();
+
+    eprintln!("Chose audio config: {config:#?}");
+
+    let mut local_buffer = Vec::with_capacity(44100);
+
+    out.build_output_stream(
+        &config,
+        move |data: &mut [f32], _| {
+            let mut buffer = samples.lock();
+            local_buffer.clone_from(&buffer);
+            buffer.clear();
+            drop(buffer);
+
+            let data_len = data.len() as f32;
+            let buffer_len = local_buffer.len() as f32;
+
+            for (i, val) in data.into_iter().enumerate() {
+                if local_buffer.is_empty() {
+                    *val = 0.0;
+                    continue;
+                }
+
+                let percent = i as f32 / data_len;
+                let buffer_i = (percent * buffer_len) as usize;
+                let sample = local_buffer[buffer_i];
+                *val = sample;
+            }
+        },
+        move |err| {
+            eprintln!("Error in audio output: {err}");
+        },
+        None,
+    )
+    .unwrap()
+}
+
+fn start_emu_thread(
+    mut cpu: Cpu,
+    mut bus: NesBus<DynMapper>,
+    running: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    let cycles_per_second = 1_789773.0;
+    let cycle_time = Duration::from_secs_f64(1.0 / cycles_per_second);
+    let mut next_cycle = Instant::now();
+
+    std::thread::spawn(move || {
+        while running.load(Ordering::Relaxed) {
+            if Instant::now() < next_cycle {
+                continue;
+            };
+            let start_cycle = bus.cycles();
+            cpu.exec(&mut bus);
+            let end_cycle = bus.cycles();
+            let took_cycles = end_cycle - start_cycle;
+
+            next_cycle += cycle_time * took_cycles as u32;
+
+            let now = Instant::now();
+            if now < next_cycle {
+                spin_sleep::sleep(next_cycle - now);
+            }
+        }
+    })
 }
 
 const DEBUG: bool = false;

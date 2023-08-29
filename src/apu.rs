@@ -1,9 +1,17 @@
 use crate::nesbus::CpuBus;
+use parking_lot::Mutex;
+use std::sync::Arc;
+
+const SAMPLES_PER_SECOND: usize = 44100;
+const CYCLES_PER_SAMPLE: usize = 1_789773 / SAMPLES_PER_SECOND;
 
 pub struct Apu {
     dmc: Dmc,
     status: Status,
     dma: Dma,
+
+    samples: Arc<Mutex<Vec<f32>>>,
+    cycles_until_sample: usize,
 }
 impl Apu {
     pub fn init() -> Self {
@@ -11,23 +19,62 @@ impl Apu {
             dmc: Dmc::init(),
             status: Status::init(),
             dma: Dma::init(),
+
+            // Preallocate enough for one second's worth of samples just cuz
+            samples: Arc::new(Mutex::new(Vec::with_capacity(SAMPLES_PER_SECOND))),
+            cycles_until_sample: CYCLES_PER_SAMPLE,
         }
     }
 
     pub fn cycle(&mut self, cpu: &mut CpuBus) {
+        self.produce_sample();
         self.perform_dma(cpu);
         self.update_dmc();
         self.handle_cpu(cpu);
         self.dma.tick_counters();
     }
 
-    fn perform_dma(&mut self, cpu: &mut CpuBus) {
-        self.dma.perform_dma(cpu);
+    fn produce_sample(&mut self) {
+        if self.cycles_until_sample != 0 {
+            self.cycles_until_sample -= 1;
+            return;
+        }
+        self.cycles_until_sample = CYCLES_PER_SAMPLE;
 
+        let sample = self.mix();
+
+        let mut buffer = self.samples.lock();
+
+        if buffer.len() == SAMPLES_PER_SECOND {
+            // We don't want the buffer growing when audio isn't being played for some reason.
+            buffer.clear();
+        }
+
+        buffer.push(sample);
+    }
+    fn mix(&mut self) -> f32 {
+        let pulse_0 = 0.0;
+        let pulse_1 = 0.0;
+        let triangle = 0.0;
+        let noise = 0.0;
+        let dmc = self.dmc.sample as f64;
+
+        let pulse_out = 0.00752 * (pulse_0 + pulse_1);
+        let tnd_out = 0.00851 * triangle + 0.00494 * noise + 0.00335 * dmc;
+        let output = pulse_out + tnd_out;
+
+        let sample = ((output * 2.0) - 1.0) as f32;
+        sample
+    }
+
+    fn perform_dma(&mut self, cpu: &mut CpuBus) {
         if self.dma.dmc_dma == DmcDma::ToReceive {
-            self.dmc.sample_buffer = Some(cpu.data());
+            let deltas = cpu.data();
+            self.dmc.sample_buffer = Some(deltas);
             self.dma.dmc_dma = DmcDma::Idle;
         }
+
+        self.dma.perform_dma(cpu);
     }
     fn update_dmc(&mut self) {
         self.update_dmc_output();
@@ -152,6 +199,10 @@ impl Apu {
             }
             _ => (),
         }
+    }
+
+    pub fn samples(&self) -> &Arc<Mutex<Vec<f32>>> {
+        &self.samples
     }
 }
 
@@ -314,6 +365,7 @@ impl Dma {
                 cpu.set_not_ready(true);
                 cpu.set_address(self.dmc_address);
                 cpu.set_read(true);
+                //eprintln!("DMC read from {:x}", self.dmc_address);
                 self.dmc_dma = DmcDma::ToReceive;
                 true
             }

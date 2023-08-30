@@ -9,6 +9,7 @@ pub struct Apu {
     dmc: Dmc,
     status: Status,
     dma: Dma,
+    frame_counter: FrameCounter,
 
     samples: Arc<Mutex<Vec<f32>>>,
     cycles_until_sample: usize,
@@ -19,6 +20,7 @@ impl Apu {
             dmc: Dmc::init(),
             status: Status::init(),
             dma: Dma::init(),
+            frame_counter: FrameCounter::init(),
 
             // Preallocate enough for one second's worth of samples just cuz
             samples: Arc::new(Mutex::new(Vec::with_capacity(SAMPLES_PER_SECOND))),
@@ -28,11 +30,74 @@ impl Apu {
 
     pub fn cycle(&mut self, cpu: &mut CpuBus) {
         self.produce_sample();
+        self.update_sound_channels();
+        self.tick_frame_counter();
         self.perform_dma(cpu);
         self.update_dmc();
         self.handle_cpu(cpu);
+        self.assert_irqs(cpu);
         self.dma.tick_counters();
     }
+
+    fn update_sound_channels(&mut self) {
+        // An APU cycle occurs every 2 CPU cycles.
+        // Repurpose dma cycle flag for fun and profit.
+        if self.dma.put_cycle {
+            return;
+        };
+    }
+
+    fn tick_frame_counter(&mut self) {
+        if self.frame_counter.cycles_until_step != 0 {
+            self.frame_counter.cycles_until_step -= 1;
+            return;
+        }
+        self.frame_counter.cycles_until_step = FrameCounter::CYCLES_PER_STEP;
+
+        if self.frame_counter.mode {
+            // Five step sequence
+            match self.frame_counter.step {
+                0 => self.tick_envelopes(),
+                1 => {
+                    self.tick_envelopes();
+                    self.tick_length_counters()
+                }
+                2 => self.tick_envelopes(),
+                3 => (),
+                4 => {
+                    self.tick_envelopes();
+                    self.tick_length_counters()
+                }
+                5.. => unreachable!(),
+            }
+            self.frame_counter.step += 1;
+            if self.frame_counter.step == 5 {
+                self.frame_counter.step = 0;
+            }
+        } else {
+            // Four step sequence
+            match self.frame_counter.step {
+                0 => self.tick_envelopes(),
+                1 => {
+                    self.tick_envelopes();
+                    self.tick_length_counters()
+                }
+                2 => self.tick_envelopes(),
+                3 => {
+                    self.tick_envelopes();
+                    self.tick_length_counters();
+                    self.status.frame_irq |= !self.frame_counter.irq_disable;
+                }
+                4.. => unreachable!(),
+            }
+            self.frame_counter.step += 1;
+            if self.frame_counter.step == 4 {
+                self.frame_counter.step = 0;
+            }
+        }
+    }
+    fn tick_length_counters(&mut self) {}
+    fn tick_envelopes(&mut self) {}
 
     fn produce_sample(&mut self) {
         if self.cycles_until_sample != 0 {
@@ -59,10 +124,23 @@ impl Apu {
         let noise = 0.0;
         let dmc = self.dmc.sample as f64;
 
-        let pulse_out = 0.00752 * (pulse_0 + pulse_1);
-        let tnd_out = 0.00851 * triangle + 0.00494 * noise + 0.00335 * dmc;
-        let output = pulse_out + tnd_out;
+        let pulse_zero = pulse_0 == 0.0 && pulse_1 == 0.0;
+        let tnd_zero = triangle == 0.0 && noise == 0.0 && dmc == 0.0;
 
+        let square_denom = 8128.0 / (pulse_0 + pulse_1) + 100.0;
+        let square_out = if pulse_zero {
+            0.0
+        } else {
+            95.88 / square_denom
+        };
+
+        let triangle = triangle / 8227.0;
+        let noise = noise / 12241.0;
+        let dmc = dmc / 22638.0;
+        let tnd_denom = 1.0 / (triangle + noise + dmc) + 100.0;
+        let tnd_out = if tnd_zero { 0.0 } else { 159.79 / tnd_denom };
+
+        let output = square_out + tnd_out;
         let sample = ((output * 2.0) - 1.0) as f32;
         sample
     }
@@ -165,12 +243,19 @@ impl Apu {
                 };
                 self.dmc.length = (cpu.data() as u16) * 16 + 1;
             }
+            0x4014 => {
+                if cpu.read() {
+                    return;
+                };
+                self.dma.start_oam_dma(cpu.data());
+            }
             0x4015 => {
                 if cpu.read() {
                     let dmc_active = self.dmc.bytes_remaining != 0;
                     let dmc_active = if dmc_active { 1 << 4 } else { 0 };
                     let dmc_irq = (self.status.dmc_irq as u8) << 6;
                     let frame_irq = (self.status.frame_irq as u8) << 7;
+
                     let byte = dmc_active | dmc_irq | frame_irq;
                     cpu.set_data(byte);
                     self.status.frame_irq = false;
@@ -191,14 +276,21 @@ impl Apu {
                     }
                 }
             }
-            0x4014 => {
+            0x4017 => {
                 if cpu.read() {
                     return;
                 };
-                self.dma.start_oam_dma(cpu.data());
+                self.frame_counter.mode = cpu.data() & 128 != 0;
+                self.frame_counter.irq_disable = cpu.data() & 64 != 0;
+                self.frame_counter.step = 0;
+                self.frame_counter.cycles_until_step = FrameCounter::CYCLES_PER_STEP;
             }
             _ => (),
         }
+    }
+    fn assert_irqs(&self, cpu: &mut CpuBus) {
+        let irq = self.status.dmc_irq || self.status.frame_irq;
+        cpu.or_irq(irq);
     }
 
     pub fn samples(&self) -> &Arc<Mutex<Vec<f32>>> {
@@ -272,6 +364,26 @@ impl Status {
             frame_irq: false,
         }
     }
+}
+
+struct FrameCounter {
+    mode: bool,
+    irq_disable: bool,
+
+    step: u8,
+    cycles_until_step: u16,
+}
+impl FrameCounter {
+    fn init() -> Self {
+        Self {
+            mode: false,
+            irq_disable: true,
+            step: 0,
+            cycles_until_step: Self::CYCLES_PER_STEP,
+        }
+    }
+
+    const CYCLES_PER_STEP: u16 = 7457;
 }
 
 struct Dma {

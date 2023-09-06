@@ -16,9 +16,9 @@ use nessy::{
     mapper::{get_mapper, DynMapper, MapperBus},
     nesbus::{CpuBus, NesBus},
     ppu::{Ppu, PpuBus},
-    rom::Rom,
     simple_debug,
 };
+use nes_rom_parser::Rom;
 use parking_lot::Mutex;
 use pixely::framebuffer::FrameBuffer;
 use pixely::{framebuffer::Pixel, FrameBufferDesc, Pixely, PixelyDesc, WindowDesc};

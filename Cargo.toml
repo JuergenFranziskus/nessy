@@ -15,3 +15,4 @@ parking_lot = "0.12.1"
 cpal = "0.15.2"
 spin_sleep = "1.1.1"
 crossbeam = "0.8.2"
+nes_rom_parser = { git = "https://github.com/JuergenFranziskus/nes_rom_parser.git" }

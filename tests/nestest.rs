@@ -4,9 +4,9 @@ use nessy::{
     mapper::{mapper0::Mapper0, MapperBus},
     nesbus::{CpuBus, NesBus},
     ppu::{Ppu, PpuBus, SCREEN_PIXELS},
-    rom::Rom,
     simple_debug,
 };
+use nes_rom_parser::Rom;
 use parking_lot::Mutex;
 use std::{
     fs::{self, File},

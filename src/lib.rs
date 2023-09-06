@@ -11,7 +11,6 @@ pub mod input;
 pub mod mapper;
 pub mod nesbus;
 pub mod ppu;
-pub mod rom;
 mod util;
 
 pub fn simple_debug(

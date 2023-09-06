@@ -2,9 +2,9 @@ use self::{mapper0::Mapper0, mapper2::Mapper2};
 use crate::{
     nesbus::CpuBus,
     ppu::PpuBus,
-    rom::Rom,
     util::{get_flag_u8, set_flag_u8},
 };
+use nes_rom_parser::Rom;
 
 pub mod mapper0;
 pub mod mapper2;

@@ -1,5 +1,6 @@
 use super::{Mapper, MapperBus};
-use crate::{nesbus::CpuBus, ppu::PpuBus, rom::Rom};
+use crate::{nesbus::CpuBus, ppu::PpuBus};
+use nes_rom_parser::Rom;
 
 pub struct Mapper2 {
     prg: Vec<u8>,

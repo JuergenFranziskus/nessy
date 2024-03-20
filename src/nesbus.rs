@@ -7,7 +7,7 @@ use crate::{
     ppu::{Ppu, PpuBus, SCREEN_PIXELS},
     util::{get_flag_u8, set_flag_u8},
 };
-use cpu_6502::{Bus, Cpu};
+use cpu_6502::Bus;
 
 use parking_lot::Mutex;
 
@@ -22,15 +22,12 @@ pub struct NesBus<M> {
     input: Input,
     ram: Box<[u8; 2048]>,
     vram: Box<[u8; 2048]>,
-
-    debug_callback: Box<dyn FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus) + Send>,
 }
 impl<M> NesBus<M> {
     pub fn new(
         mapper: M,
         framebuffer: Arc<Mutex<[u8; SCREEN_PIXELS]>>,
         controller_inputs: [Arc<Mutex<Controller>>; 2],
-        debug_callback: impl FnMut(u64, &Cpu, CpuBus, &Ppu, PpuBus, MapperBus) + Send + 'static,
     ) -> Self {
         Self {
             cycle: 0,
@@ -43,8 +40,6 @@ impl<M> NesBus<M> {
             input: Input::init(controller_inputs),
             ram: Box::new([0; 2048]),
             vram: Box::new([0; 2048]),
-
-            debug_callback: Box::new(debug_callback) as _,
         }
     }
 
@@ -68,6 +63,14 @@ impl<M> NesBus<M>
 where
     M: Mapper,
 {
+    fn cycle(&mut self) {
+        self.cpu_bus.set_irq(false);
+        self.cpu_cycle();
+        self.ppu_cycle();
+        self.ppu_cycle();
+
+        self.cycle += 1;
+    }
     fn cpu_cycle(&mut self) {
         self.apu.cycle(&mut self.cpu_bus);
         self.ppu.cycle(&mut self.ppu_bus, &mut self.cpu_bus);
@@ -115,10 +118,6 @@ impl<M> Bus for NesBus<M>
 where
     M: Mapper,
 {
-    fn data(&self) -> u8 {
-        self.cpu_bus.data()
-    }
-
     fn rst(&self) -> bool {
         self.cpu_bus.rst()
     }
@@ -131,45 +130,25 @@ where
         self.cpu_bus.irq()
     }
 
-    fn not_ready(&self) -> bool {
-        self.cpu_bus.not_ready()
-    }
 
-    fn set_data(&mut self, data: u8) {
-        self.cpu_bus.set_data(data);
-    }
 
-    fn set_address(&mut self, addr: u16) {
-        self.cpu_bus.set_address(addr);
-    }
-
-    fn set_read(&mut self, read: bool) {
-        self.cpu_bus.set_read(read);
-    }
-
-    fn set_sync(&mut self, sync: bool) {
+    fn read(&mut self, addr: u16, sync: bool, halt: bool) -> (u8, bool) {
         self.cpu_bus.set_sync(sync);
-    }
-
-    fn set_halt(&mut self, halt: bool) {
         self.cpu_bus.set_halt(halt);
+        self.cpu_bus.set_address(addr);
+        self.cpu_bus.set_read(true);
+        self.cycle();
+        let data = self.cpu_bus.data;
+        let not_ready = self.cpu_bus.not_ready();
+        (data, not_ready)
     }
-
-    fn cycle(&mut self, cpu: &cpu_6502::Cpu) {
-        self.cpu_bus.set_irq(false);
-        self.cpu_cycle();
-        self.ppu_cycle();
-        self.ppu_cycle();
-
-        (self.debug_callback)(
-            self.cycle,
-            cpu,
-            self.cpu_bus,
-            &self.ppu,
-            self.ppu_bus,
-            self.mapper_bus,
-        );
-        self.cycle += 1;
+    fn write(&mut self, addr: u16, data: u8) {
+        self.cpu_bus.set_address(addr);
+        self.cpu_bus.set_data(data);
+        self.cpu_bus.set_sync(false);
+        self.cpu_bus.set_halt(false);
+        self.cpu_bus.set_read(false);
+        self.cycle();
     }
 }
 

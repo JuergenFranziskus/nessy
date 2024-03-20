@@ -13,10 +13,8 @@ use nessy::ppu::SCREEN_PIXELS;
 use nessy::ppu::SCREEN_WIDTH;
 use nessy::{
     input::Controller,
-    mapper::{get_mapper, DynMapper, MapperBus},
-    nesbus::{CpuBus, NesBus},
-    ppu::{Ppu, PpuBus},
-    simple_debug,
+    mapper::{get_mapper, DynMapper},
+    nesbus::NesBus,
 };
 use nes_rom_parser::Rom;
 use parking_lot::Mutex;
@@ -26,10 +24,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::{
-    io::stdout,
-    time::{Duration, Instant},
-};
+use std::
+    time::{Duration, Instant}
+;
 use wgpu::{
     Adapter, Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor, PowerPreference,
     Queue, RequestAdapterOptions,
@@ -89,12 +86,14 @@ fn main() {
             update_framebuffer(&buffer, pixely.buffer_mut());
             drop(buffer);
 
+
             pixely.render(&device, &queue).unwrap();
 
             next_frame += frame_duration;
             let now = Instant::now();
             if now < next_frame {
-                spin_sleep::sleep(next_frame - now);
+                let dur = next_frame - now;
+                spin_sleep::sleep(dur);
             }
             *cf = ControlFlow::Poll;
         }
@@ -184,7 +183,7 @@ fn start_nes() -> (
     Arc<Mutex<[u8; SCREEN_PIXELS]>>,
     [Arc<Mutex<Controller>>; 2],
 ) {
-    let src = std::fs::read("./roms/SuperMarioBros.nes").unwrap();
+    let src = std::fs::read("./test_roms/nestest.nes").unwrap();
     let rom = Rom::parse(&src).unwrap();
     eprintln!("{:#?}", rom.header);
     let mapper = get_mapper(&rom);
@@ -198,7 +197,6 @@ fn start_nes() -> (
         mapper,
         Arc::clone(&framebuffer),
         [Arc::clone(&rec_ctrl_0), Arc::clone(&rec_ctrl_1)],
-        debug,
     );
 
     (cpu, bus, framebuffer, [rec_ctrl_0, rec_ctrl_1])
@@ -275,14 +273,6 @@ fn start_emu_thread(
             }
         }
     })
-}
-
-const DEBUG: bool = false;
-fn debug(cycle: u64, cpu: &Cpu, bus: CpuBus, ppu: &Ppu, ppu_bus: PpuBus, mapper_bus: MapperBus) {
-    if !DEBUG {
-        return;
-    };
-    simple_debug(cycle, cpu, bus, ppu, ppu_bus, mapper_bus, stdout()).unwrap();
 }
 
 fn translate_color(color: u8) -> Pixel {

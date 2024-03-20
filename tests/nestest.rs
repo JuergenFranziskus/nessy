@@ -1,16 +1,15 @@
 use cpu_6502::Cpu;
 use nessy::{
     input::Controller,
-    mapper::{mapper0::Mapper0, MapperBus},
-    nesbus::{CpuBus, NesBus},
-    ppu::{Ppu, PpuBus, SCREEN_PIXELS},
-    simple_debug,
+    mapper::mapper0::Mapper0,
+    nesbus::NesBus,
+    ppu::SCREEN_PIXELS,
 };
 use nes_rom_parser::Rom;
 use parking_lot::Mutex;
 use std::{
     fs::{self, File},
-    io::{stderr, BufRead, BufReader},
+    io::{BufRead, BufReader},
     sync::Arc,
 };
 
@@ -31,7 +30,7 @@ pub fn nestest() {
     let input_1 = Arc::new(Mutex::new(Controller(0)));
 
     let mut cpu = Cpu::new();
-    let mut bus = NesBus::new(mapper, framebuffer, [input_0, input_1], dummy_debug);
+    let mut bus = NesBus::new(mapper, framebuffer, [input_0, input_1]);
 
     // Run reset sequence
     cpu.exec(&mut bus);
@@ -43,21 +42,6 @@ pub fn nestest() {
     }
 
     println!("Tests are done");
-}
-
-const DEBUG: bool = false;
-fn dummy_debug(
-    cycle: u64,
-    cpu: &Cpu,
-    bus: CpuBus,
-    ppu: &Ppu,
-    ppu_bus: PpuBus,
-    mapper_bus: MapperBus,
-) {
-    if !DEBUG {
-        return;
-    };
-    simple_debug(cycle, cpu, bus, ppu, ppu_bus, mapper_bus, stderr()).unwrap();
 }
 
 fn compare_state(line: &str, cpu: &Cpu, bus: &NesBus<Mapper0>) {

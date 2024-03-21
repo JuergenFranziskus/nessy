@@ -6,7 +6,7 @@ use cpal::SampleFormat;
 use cpal::Stream;
 use cpal::SupportedStreamConfigRange;
 use cpu_6502::Cpu;
-use futures::executor::block_on;
+use nes_rom_parser::Rom;
 use nessy::mapper::Mapper;
 use nessy::ppu::SCREEN_HEIGHT;
 use nessy::ppu::SCREEN_PIXELS;
@@ -16,116 +16,169 @@ use nessy::{
     mapper::{get_mapper, DynMapper},
     nesbus::NesBus,
 };
-use nes_rom_parser::Rom;
 use parking_lot::Mutex;
-use pixely::framebuffer::FrameBuffer;
-use pixely::{framebuffer::Pixel, FrameBufferDesc, Pixely, PixelyDesc, WindowDesc};
+use softbuffer::Buffer;
+use softbuffer::Context;
+use softbuffer::Surface;
+use std::num::NonZeroU32;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::
-    time::{Duration, Instant}
-;
-use wgpu::{
-    Adapter, Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor, PowerPreference,
-    Queue, RequestAdapterOptions,
-};
+use std::time::{Duration, Instant};
+use winit::dpi::PhysicalSize;
+use winit::keyboard::KeyCode;
+use winit::keyboard::PhysicalKey;
+use winit::window::Window;
 use winit::{
-    event::{ElementState, Event, VirtualKeyCode, WindowEvent},
+    event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
 
 fn main() {
-    let ev_loop = EventLoop::new();
-    let window = WindowBuilder::new().build(&ev_loop).unwrap();
-    let (instance, adapter, device, queue) = init_wgpu();
-    let mut pixely = Pixely::new(PixelyDesc {
-        window: WindowDesc {
-            window: &window,
-            width: window.inner_size().width as usize,
-            height: window.inner_size().height as usize,
-        },
-        buffer: FrameBufferDesc {
-            width: SCREEN_WIDTH,
-            height: SCREEN_HEIGHT,
-        },
-        instance: &instance,
-        adapter: &adapter,
-        device: &device,
-        queue: &queue,
-    })
-    .unwrap();
-
-    let (host, audio_device) = init_audio();
-
-    let (cpu, bus, framebuffer, ctrl_inputs) = start_nes();
-    let running = Arc::new(AtomicBool::new(true));
-    let sound_stream = start_audio_stream(&audio_device, &bus);
-    sound_stream.play().unwrap();
-
-    let mut emu_thread = Some(start_emu_thread(cpu, bus, Arc::clone(&running)));
-
+    let (mut app, ev_loop) = App::init();
     let frame_duration = Duration::from_secs_f64(1.0 / 60.0);
     let mut next_frame = Instant::now();
 
-    ev_loop.run(move |ev, _, cf| match ev {
+    let res = ev_loop.run(move |ev, loop_target| match ev {
         Event::WindowEvent { event, .. } => match event {
-            WindowEvent::Resized(size) => {
-                pixely.resize_surface(size.width as usize, size.height as usize);
-            }
             WindowEvent::CloseRequested => {
-                *cf = ControlFlow::Exit;
+                loop_target.exit();
             }
-            WindowEvent::KeyboardInput { input, .. } => handle_keyboard(&ctrl_inputs, input),
+            WindowEvent::Resized(size) => {
+                if let Err(err) = app.surface.resize(
+                    NonZeroU32::new(size.width).unwrap(),
+                    NonZeroU32::new(size.height).unwrap(),
+                ) {
+                    eprintln!(
+                        "Failed to resize render-surface to {} by {}: {err}",
+                        size.width, size.height
+                    );
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => handle_keyboard(&app.ctrl_inputs, event),
+            WindowEvent::RedrawRequested => {
+                if let Ok(to) = app.surface.buffer_mut() {
+                    let from = app.framebuffer.lock();
+
+                    let size = app.window.inner_size();
+                    update_framebuffer(&from, to, size);
+                } else {
+                    eprintln!("Failed to acquire render-surface for rendering");
+                }
+
+                next_frame += frame_duration;
+                let now = Instant::now();
+                if now < next_frame {
+                    let dur = next_frame - now;
+                    spin_sleep::sleep(dur);
+                }
+                loop_target.set_control_flow(ControlFlow::Poll);
+            }
             _ => (),
         },
-        Event::MainEventsCleared => {
-            let buffer = framebuffer.lock();
-            update_framebuffer(&buffer, pixely.buffer_mut());
-            drop(buffer);
-
-
-            pixely.render(&device, &queue).unwrap();
-
-            next_frame += frame_duration;
-            let now = Instant::now();
-            if now < next_frame {
-                let dur = next_frame - now;
-                spin_sleep::sleep(dur);
-            }
-            *cf = ControlFlow::Poll;
+        Event::AboutToWait => {
+            app.window.request_redraw();
         }
-        Event::LoopDestroyed => {
-            sound_stream.pause().unwrap();
-            let Some(handle) = emu_thread.take() else {
+        Event::LoopExiting => {
+            app.sound_stream.pause().unwrap();
+            let Some(handle) = app.emu_thread.take() else {
                 unreachable!()
             };
-            running.store(false, Ordering::Relaxed);
+            app.running.store(false, Ordering::Relaxed);
             handle.join().unwrap();
-
-            // Mention the host so it gets moved into the closure and dropped properly.
-            // Since the ev_loop hijacks the main thread, everything outside the closure doesn't get dropped.
-            let _id = host.id();
         }
         _ => (),
-    })
+    });
+
+    res.unwrap();
 }
 
-fn handle_keyboard(inputs: &[Arc<Mutex<Controller>>; 2], input: winit::event::KeyboardInput) {
-    let Some(keycode) = input.virtual_keycode else {
-        return;
-    };
+fn update_framebuffer(
+    from: &[u8; SCREEN_PIXELS],
+    mut to: Buffer<Arc<Window>, Arc<Window>>,
+    size: PhysicalSize<u32>,
+) {
+    let width = size.width;
+    let height = size.height;
+
+    for i in 0..(width * height) {
+        let y = i / width;
+        let x = i % width;
+
+        let from_x = x * SCREEN_WIDTH as u32 / width;
+        let from_y = y * SCREEN_HEIGHT as u32 / height;
+        let from_i = from_y * SCREEN_WIDTH as u32 + from_x;
+
+        let pixel = from[from_i as usize];
+        let [r, g, b] = translate_color(pixel);
+        to[i as usize] = b | (g << 8) | (r << 16);
+    }
+
+    if let Err(err) = to.present() {
+        eprintln!("Failed to present render-surface: {err}");
+    }
+}
+
+struct App {
+    window: Arc<Window>,
+    host: Host,
+    audio_device: cpal::Device,
+    sound_stream: Stream,
+
+    context: Context<Arc<Window>>,
+    surface: Surface<Arc<Window>, Arc<Window>>,
+
+    emu_thread: Option<JoinHandle<()>>,
+    running: Arc<AtomicBool>,
+    framebuffer: Arc<Mutex<[u8; SCREEN_PIXELS]>>,
+    ctrl_inputs: [Arc<Mutex<Controller>>; 2],
+}
+impl App {
+    fn init() -> (App, EventLoop<()>) {
+        let ev_loop = EventLoop::new().unwrap();
+        let window = Arc::new(WindowBuilder::new().build(&ev_loop).unwrap());
+
+        let context = Context::new(window.clone()).unwrap();
+        let surface = Surface::new(&context, window.clone()).unwrap();
+
+        let (cpu, bus, framebuffer, ctrl_inputs) = start_nes();
+        let running = Arc::new(AtomicBool::new(true));
+
+        let (host, audio_device) = init_audio();
+        let sound_stream = start_audio_stream(&audio_device, &bus);
+
+        let emu_thread = start_emu_thread(cpu, bus, running.clone());
+
+        let app = Self {
+            window,
+            host,
+            audio_device,
+            sound_stream,
+            context,
+            surface,
+            emu_thread: Some(emu_thread),
+            running,
+            framebuffer,
+            ctrl_inputs,
+        };
+
+        (app, ev_loop)
+    }
+}
+
+fn handle_keyboard(inputs: &[Arc<Mutex<Controller>>; 2], input: winit::event::KeyEvent) {
+    let keycode = input.physical_key;
     let function = match keycode {
-        VirtualKeyCode::I => Controller::set_up,
-        VirtualKeyCode::K => Controller::set_down,
-        VirtualKeyCode::J => Controller::set_left,
-        VirtualKeyCode::L => Controller::set_right,
-        VirtualKeyCode::D => Controller::set_a,
-        VirtualKeyCode::F => Controller::set_b,
-        VirtualKeyCode::S => Controller::set_select,
-        VirtualKeyCode::Return => Controller::set_start,
+        PhysicalKey::Code(KeyCode::KeyI) => Controller::set_up,
+        PhysicalKey::Code(KeyCode::KeyK) => Controller::set_down,
+        PhysicalKey::Code(KeyCode::KeyJ) => Controller::set_left,
+        PhysicalKey::Code(KeyCode::KeyL) => Controller::set_right,
+        PhysicalKey::Code(KeyCode::KeyD) => Controller::set_a,
+        PhysicalKey::Code(KeyCode::KeyF) => Controller::set_b,
+        PhysicalKey::Code(KeyCode::KeyS) => Controller::set_select,
+        PhysicalKey::Code(KeyCode::Enter) => Controller::set_start,
         _ => return,
     };
 
@@ -136,41 +189,7 @@ fn handle_keyboard(inputs: &[Arc<Mutex<Controller>>; 2], input: winit::event::Ke
 
     function(&mut inputs[0].lock(), state);
 }
-fn update_framebuffer(ppu_buffer: &[u8; SCREEN_PIXELS], framebuffer: &mut FrameBuffer) {
-    for y in 0..SCREEN_HEIGHT {
-        for x in 0..SCREEN_WIDTH {
-            let i = y * SCREEN_WIDTH + x;
-            let color = translate_color(ppu_buffer[i]);
-            framebuffer.set_pixel(x, y, color);
-        }
-    }
-}
 
-fn init_wgpu() -> (Instance, Adapter, Device, Queue) {
-    let instance = Instance::new(InstanceDescriptor {
-        backends: Backends::PRIMARY,
-        dx12_shader_compiler: Default::default(),
-    });
-
-    let adapter = instance.request_adapter(&RequestAdapterOptions {
-        power_preference: PowerPreference::HighPerformance,
-        force_fallback_adapter: false,
-        compatible_surface: None,
-    });
-    let adapter = block_on(adapter).unwrap();
-
-    let device = adapter.request_device(
-        &DeviceDescriptor {
-            label: None,
-            features: adapter.features(),
-            limits: adapter.limits(),
-        },
-        None,
-    );
-    let (device, queue) = block_on(device).unwrap();
-
-    (instance, adapter, device, queue)
-}
 fn init_audio() -> (Host, cpal::Device) {
     let host = cpal::default_host();
     let device = host.default_output_device().unwrap();
@@ -183,7 +202,7 @@ fn start_nes() -> (
     Arc<Mutex<[u8; SCREEN_PIXELS]>>,
     [Arc<Mutex<Controller>>; 2],
 ) {
-    let src = std::fs::read("./test_roms/nestest.nes").unwrap();
+    let src = std::fs::read("./roms/SuperMarioBros.nes").unwrap();
     let rom = Rom::parse(&src).unwrap();
     eprintln!("{:#?}", rom.header);
     let mapper = get_mapper(&rom);
@@ -275,18 +294,13 @@ fn start_emu_thread(
     })
 }
 
-fn translate_color(color: u8) -> Pixel {
+fn translate_color(color: u8) -> [u32; 3] {
     let index = color as usize * 3;
     let r = PALETTE[index + 0];
     let g = PALETTE[index + 1];
     let b = PALETTE[index + 2];
 
-    Pixel {
-        red: r,
-        green: g,
-        blue: b,
-        alpha: 255,
-    }
+    [r as u32, g as u32, b as u32]
 }
 
 static PALETTE: &[u8] = include_bytes!("ntscpalette.pal");

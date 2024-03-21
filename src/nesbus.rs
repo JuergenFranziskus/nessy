@@ -130,8 +130,6 @@ where
         self.cpu_bus.irq()
     }
 
-
-
     fn read(&mut self, addr: u16, sync: bool, halt: bool) -> (u8, bool) {
         self.cpu_bus.set_sync(sync);
         self.cpu_bus.set_halt(halt);

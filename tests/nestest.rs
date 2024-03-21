@@ -1,11 +1,6 @@
 use cpu_6502::Cpu;
-use nessy::{
-    input::Controller,
-    mapper::mapper0::Mapper0,
-    nesbus::NesBus,
-    ppu::SCREEN_PIXELS,
-};
 use nes_rom_parser::Rom;
+use nessy::{input::Controller, mapper::mapper0::Mapper0, nesbus::NesBus, ppu::SCREEN_PIXELS};
 use parking_lot::Mutex;
 use std::{
     fs::{self, File},

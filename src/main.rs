@@ -36,6 +36,9 @@ use winit::{
     window::WindowBuilder,
 };
 
+const ENABLE_AUDIO: bool = false;
+const ROM_FILE: &str = "roms/SuperMarioBros.nes";
+
 fn main() {
     let (mut app, ev_loop) = App::init();
     let frame_duration = Duration::from_secs_f64(1.0 / 60.0);
@@ -103,17 +106,45 @@ fn update_framebuffer(
     let width = size.width;
     let height = size.height;
 
-    for i in 0..(width * height) {
-        let y = i / width;
-        let x = i % width;
+    let x_step = width / SCREEN_WIDTH as u32;
+    let y_step = height / SCREEN_HEIGHT as u32;
+    let mut x_count = x_step;
+    let mut y_count = y_step;
+    let mut from_x = 0;
+    let mut from_y = 0;
 
-        let from_x = x * SCREEN_WIDTH as u32 / width;
-        let from_y = y * SCREEN_HEIGHT as u32 / height;
-        let from_i = from_y * SCREEN_WIDTH as u32 + from_x;
+    for y in 0..height {
+        from_x = 0;
+        x_count = x_step;
+        if y_count == 0 {
+            from_y += 1;
+            y_count = y_step;
+        }
+        y_count -= 1;
 
-        let pixel = from[from_i as usize];
-        let [r, g, b] = translate_color(pixel);
-        to[i as usize] = b | (g << 8) | (r << 16);
+        if from_y >= SCREEN_HEIGHT as u32 {
+            break;
+        };
+
+        for x in 0..width {
+            if x_count == 0 {
+                from_x += 1;
+                x_count = x_step;
+            }
+            x_count -= 1;
+
+            if from_x >= SCREEN_WIDTH as u32 {
+                break;
+            };
+
+            let from_i = from_y * SCREEN_WIDTH as u32 + from_x;
+            let to_i = y * width + x;
+
+            let pixel = from[from_i as usize];
+            let [r, g, b] = translate_color(pixel);
+            let color = (r as u32) << 16 | (g as u32) << 8 | b as u32;
+            to[to_i as usize] = color;
+        }
     }
 
     if let Err(err) = to.present() {
@@ -202,7 +233,7 @@ fn start_nes() -> (
     Arc<Mutex<[u8; SCREEN_PIXELS]>>,
     [Arc<Mutex<Controller>>; 2],
 ) {
-    let src = std::fs::read("./roms/SuperMarioBros.nes").unwrap();
+    let src = std::fs::read(ROM_FILE).unwrap();
     let rom = Rom::parse(&src).unwrap();
     eprintln!("{:#?}", rom.header);
     let mapper = get_mapper(&rom);
@@ -237,24 +268,30 @@ fn start_audio_stream(out: &cpal::Device, bus: &NesBus<impl Mapper>) -> Stream {
     out.build_output_stream(
         &config,
         move |data: &mut [f32], _| {
-            let mut buffer = samples.lock();
-            local_buffer.clone_from(&buffer);
-            buffer.clear();
-            drop(buffer);
+            if ENABLE_AUDIO {
+                let mut buffer = samples.lock();
+                local_buffer.clone_from(&buffer);
+                buffer.clear();
+                drop(buffer);
 
-            let data_len = data.len() as f32;
-            let buffer_len = local_buffer.len() as f32;
+                let data_len = data.len() as f32;
+                let buffer_len = local_buffer.len() as f32;
 
-            for (i, val) in data.into_iter().enumerate() {
-                if local_buffer.is_empty() {
-                    *val = 0.0;
-                    continue;
+                for (i, val) in data.into_iter().enumerate() {
+                    if local_buffer.is_empty() {
+                        *val = 0.0;
+                        continue;
+                    }
+
+                    let percent = i as f32 / data_len;
+                    let buffer_i = (percent * buffer_len) as usize;
+                    let sample = local_buffer[buffer_i];
+                    *val = sample;
                 }
-
-                let percent = i as f32 / data_len;
-                let buffer_i = (percent * buffer_len) as usize;
-                let sample = local_buffer[buffer_i];
-                *val = sample;
+            } else {
+                for val in data {
+                    *val = 0.0;
+                }
             }
         },
         move |err| {

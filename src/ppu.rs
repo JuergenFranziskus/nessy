@@ -10,9 +10,9 @@ use crate::{
 const WIDTH: u16 = 341;
 const HEIGHT: u16 = 262;
 
-pub const SCREEN_WIDTH: usize = 256;
-pub const SCREEN_HEIGHT: usize = 240;
-pub const SCREEN_PIXELS: usize = SCREEN_WIDTH * SCREEN_HEIGHT;
+pub const FRAMEBUFFER_WIDTH: usize = 256;
+pub const FRAMEBUFFER_HEIGHT: usize = 240;
+pub const FRAMEBUFFER_PIXELS: usize = FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT;
 
 pub struct Ppu {
     meta: Meta,
@@ -30,11 +30,11 @@ pub struct Ppu {
     shifters: Shifters,
     sprites: Box<Sprites>,
 
-    staging_buffer: Box<[u8; SCREEN_PIXELS]>,
-    framebuffer: Arc<Mutex<[u8; SCREEN_PIXELS]>>,
+    staging_buffer: Box<[u8; FRAMEBUFFER_PIXELS]>,
+    framebuffer: Arc<Mutex<[u8; FRAMEBUFFER_PIXELS]>>,
 }
 impl Ppu {
-    pub fn init(framebuffer: Arc<Mutex<[u8; SCREEN_PIXELS]>>) -> Self {
+    pub fn init(framebuffer: Arc<Mutex<[u8; FRAMEBUFFER_PIXELS]>>) -> Self {
         Self {
             meta: Meta::init(),
             control: Control::init(),
@@ -51,7 +51,7 @@ impl Ppu {
             shifters: Shifters::init(),
             sprites: Box::new(Sprites::init()),
 
-            staging_buffer: Box::new([0; SCREEN_PIXELS]),
+            staging_buffer: Box::new([0; FRAMEBUFFER_PIXELS]),
             framebuffer,
         }
     }
@@ -342,7 +342,7 @@ impl Ppu {
             self.meta.set_sprite_zero_hit(true);
         }
 
-        let i = y * SCREEN_WIDTH + x;
+        let i = y * FRAMEBUFFER_WIDTH + x;
         self.staging_buffer[i] = color;
     }
     fn generate_sprite_pixel(&self) -> (u8, u8, bool, bool) {

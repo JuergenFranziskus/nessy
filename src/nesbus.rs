@@ -4,7 +4,7 @@ use crate::{
     apu::Apu,
     input::{Controller, Input},
     mapper::{Mapper, MapperBus},
-    ppu::{Ppu, PpuBus, SCREEN_PIXELS},
+    ppu::{Ppu, PpuBus, FRAMEBUFFER_PIXELS},
     util::{get_flag_u8, set_flag_u8},
 };
 use cpu_6502::Bus;
@@ -26,7 +26,7 @@ pub struct NesBus<M> {
 impl<M> NesBus<M> {
     pub fn new(
         mapper: M,
-        framebuffer: Arc<Mutex<[u8; SCREEN_PIXELS]>>,
+        framebuffer: Arc<Mutex<[u8; FRAMEBUFFER_PIXELS]>>,
         controller_inputs: [Arc<Mutex<Controller>>; 2],
     ) -> Self {
         Self {

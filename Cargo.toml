@@ -10,9 +10,9 @@ cpu_6502 = { git = "https://github.com/JuergenFranziskus/cpu_6502.git" }
 winit = "0.29.15"
 futures = "0.3.28"
 parking_lot = "0.12.1"
-cpal = "0.15.2"
 spin_sleep = "1.1.1"
 crossbeam = "0.8.2"
 nes_rom_parser = { git = "https://github.com/JuergenFranziskus/nes_rom_parser.git" }
 wgpu = "0.19.3"
 env_logger = "0.11.3"
+bytemuck = "1.15.0"

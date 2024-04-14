@@ -1,6 +1,6 @@
 use cpu_6502::Cpu;
 use nes_rom_parser::Rom;
-use nessy::{input::Controller, mapper::mapper0::Mapper0, nesbus::NesBus, ppu::FRAMEBUFFER_PIXELS};
+use nessy::{input::Controller, mapper::mapper0::Mapper0, nesbus::NesBus};
 use parking_lot::Mutex;
 use std::{
     fs::{self, File},
@@ -20,12 +20,11 @@ pub fn nestest() {
     mapper.overwrite(0xFFFC, 0x00);
     mapper.overwrite(0xFFFD, 0xC0);
 
-    let framebuffer = Arc::new(Mutex::new([0; FRAMEBUFFER_PIXELS]));
     let input_0 = Arc::new(Mutex::new(Controller(0)));
     let input_1 = Arc::new(Mutex::new(Controller(0)));
 
     let mut cpu = Cpu::new();
-    let mut bus = NesBus::new(mapper, framebuffer, [input_0, input_1]);
+    let mut bus = NesBus::new(mapper, [input_0, input_1]);
 
     // Run reset sequence
     cpu.exec(&mut bus);

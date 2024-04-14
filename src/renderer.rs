@@ -1,14 +1,17 @@
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 use futures::executor::block_on;
+use nessy::ppu::pixel_buffer::{PixelBuffer, PIXELS};
 use wgpu::{
-    include_wgsl, Adapter, Backends, Color, ColorTargetState, ColorWrites, Device,
-    DeviceDescriptor, Dx12Compiler, Face, FragmentState, FrontFace, Gles3MinorVersion, Instance,
-    InstanceDescriptor, InstanceFlags, LoadOp, MultisampleState, Operations, PolygonMode,
-    PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, Queue,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
-    RequestAdapterOptions, StoreOp, Surface, SurfaceConfiguration, TextureViewDescriptor,
-    VertexState,
+    include_wgsl, Adapter, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry,
+    BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer,
+    BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites,
+    Device, DeviceDescriptor, Dx12Compiler, Face, FragmentState, FrontFace, Gles3MinorVersion,
+    Instance, InstanceDescriptor, InstanceFlags, LoadOp, MultisampleState, Operations,
+    PipelineLayout, PipelineLayoutDescriptor, PolygonMode, PowerPreference, PresentMode,
+    PrimitiveState, PrimitiveTopology, Queue, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, ShaderStages, StoreOp,
+    Surface, SurfaceConfiguration, TextureViewDescriptor, VertexState,
 };
 use winit::{dpi::PhysicalSize, event::WindowEvent, window::Window};
 
@@ -20,9 +23,8 @@ pub struct Renderer {
     surface: Surface<'static>,
     config: SurfaceConfiguration,
     needs_reconfig: bool,
-    force_reconfig: bool,
 
-    pipeline: RenderPipeline,
+    pipeline: Pipeline,
 }
 impl Renderer {
     pub fn init(window: Arc<Window>) -> Self {
@@ -61,7 +63,7 @@ impl Renderer {
 
         let pipeline = create_render_pipeline(&device, &config);
 
-        Self {
+        let renderer = Self {
             _instance: instance,
             _adapter: adapter,
             device,
@@ -69,14 +71,32 @@ impl Renderer {
             surface,
             config,
             needs_reconfig: true,
-            force_reconfig: false,
             pipeline,
+        };
+
+        renderer.upload_palette();
+        renderer
+    }
+    fn upload_palette(&self) {
+        fn u8_to_f32(val: u8) -> f32 {
+            (val as f32 / 255.0).clamp(0.0, 1.0)
         }
+
+        let mut pped = Vec::with_capacity(64 * 4);
+        for chunk in PALETTE.chunks_exact(3) {
+            pped.push(u8_to_f32(chunk[0]));
+            pped.push(u8_to_f32(chunk[1]));
+            pped.push(u8_to_f32(chunk[2]));
+            pped.push(1.0);
+        }
+
+        let as_bytes = bytemuck::cast_slice(&pped);
+        self.queue
+            .write_buffer(&self.pipeline.palette_buffer, 0, as_bytes);
     }
 
     pub fn window_event(&mut self, ev: &WindowEvent) {
         match ev {
-            &WindowEvent::Focused(focus) => self.force_reconfig = !focus,
             &WindowEvent::Resized(size) => self.resize(size),
             _ => (),
         }
@@ -87,38 +107,32 @@ impl Renderer {
         self.needs_reconfig = true;
     }
 
-    fn acquire(&mut self) -> wgpu::SurfaceTexture {
-        let surface = &mut self.surface;
+    fn reconfigure_surface(&mut self) {
+        self.surface.configure(&self.device, &self.config);
+        self.needs_reconfig = false;
 
-        match surface.get_current_texture() {
-            Ok(frame) => frame,
-            // If we timed out, just try again
-            Err(wgpu::SurfaceError::Timeout) => surface
-                .get_current_texture()
-                .expect("Failed to acquire next surface texture!"),
-            Err(
-                // If the surface is outdated, or was lost, reconfigure it.
-                wgpu::SurfaceError::Outdated
-                | wgpu::SurfaceError::Lost
-                // If OutOfMemory happens, reconfiguring may not help, but we might as well try
-                | wgpu::SurfaceError::OutOfMemory,
-            ) => {
-                surface.configure(&self.device, &self.config);
-                surface
-                    .get_current_texture()
-                    .expect("Failed to acquire next surface texture!")
-            }
-        }
+        let size = [self.config.width, self.config.height];
+        let bytes = bytemuck::cast_slice(&size);
+        self.queue
+            .write_buffer(&self.pipeline.screen_buffer, 0, bytes);
     }
+
+    pub fn upload_pixels(&self, pixels: &PixelBuffer) {
+        let bytes = bytemuck::cast_slice(&pixels.0);
+        self.queue
+            .write_buffer(&self.pipeline.pixel_buffer, 0, bytes);
+    }
+
     pub fn render(&mut self) {
         if self.config.width == 0 || self.config.height == 0 {
             return;
         };
-        if self.needs_reconfig || self.force_reconfig {
-            self.surface.configure(&self.device, &self.config);
-            self.needs_reconfig = false;
+        if self.needs_reconfig {
+            self.reconfigure_surface();
         }
-        let tex = self.acquire();
+        let Ok(tex) = self.surface.get_current_texture() else {
+            return;
+        };
 
         let mut cmd = self.device.create_command_encoder(&Default::default());
         {
@@ -138,7 +152,8 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&self.pipeline.pipeline);
+            pass.set_bind_group(0, &self.pipeline.bind_group, &[]);
             pass.draw(0..6, 0..1);
         }
 
@@ -147,13 +162,15 @@ impl Renderer {
     }
 }
 
-fn create_render_pipeline(device: &Device, config: &SurfaceConfiguration) -> RenderPipeline {
+fn create_render_pipeline(device: &Device, config: &SurfaceConfiguration) -> Pipeline {
     let src = include_wgsl!("shader.wgsl");
     let module = device.create_shader_module(src);
 
-    device.create_render_pipeline(&RenderPipelineDescriptor {
+    let (bind_group_layout, pipeline_layout) = create_pipeline_layout(device);
+
+    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
         label: None,
-        layout: None,
+        layout: Some(&pipeline_layout),
         vertex: VertexState {
             module: &module,
             entry_point: "vs_main",
@@ -184,5 +201,116 @@ fn create_render_pipeline(device: &Device, config: &SurfaceConfiguration) -> Ren
             })],
         }),
         multiview: None,
-    })
+    });
+
+    let (pixel_buffer, screen_buffer, palette_buffer, bind_group) =
+        create_bind_group(device, bind_group_layout);
+
+    Pipeline {
+        pipeline,
+        pixel_buffer,
+        screen_buffer,
+        palette_buffer,
+        bind_group,
+    }
 }
+fn create_pipeline_layout(device: &Device) -> (BindGroupLayout, PipelineLayout) {
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(NonZeroU64::new(PIXELS as u64 * 4).unwrap()),
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(NonZeroU64::new(8).unwrap()),
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(NonZeroU64::new(PALETTE_ENTRIES as u64 * 16).unwrap()),
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    (bind_group_layout, layout)
+}
+fn create_bind_group(
+    device: &Device,
+    layout: BindGroupLayout,
+) -> (Buffer, Buffer, Buffer, BindGroup) {
+    let pixel_buffer = device.create_buffer(&BufferDescriptor {
+        label: None,
+        size: PIXELS as u64 * 4,
+        usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let screen_buffer = device.create_buffer(&BufferDescriptor {
+        label: None,
+        size: 8 as u64,
+        usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+        mapped_at_creation: false,
+    });
+    let palette_buffer = device.create_buffer(&BufferDescriptor {
+        label: None,
+        size: PALETTE_ENTRIES as u64 * 16,
+        usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: None,
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: pixel_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: screen_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: palette_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    (pixel_buffer, screen_buffer, palette_buffer, bind_group)
+}
+
+struct Pipeline {
+    pipeline: RenderPipeline,
+    pixel_buffer: Buffer,
+    screen_buffer: Buffer,
+    palette_buffer: Buffer,
+    bind_group: BindGroup,
+}
+
+const PALETTE_ENTRIES: usize = 64;
+static PALETTE: &[u8] = include_bytes!("ntscpalette.pal");

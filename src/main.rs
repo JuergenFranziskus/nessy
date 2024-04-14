@@ -1,18 +1,16 @@
 use app::App;
-use cpal::traits::StreamTrait;
-
 use nessy::input::Controller;
 use parking_lot::Mutex;
 use renderer::Renderer;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 use winit::{
     event::{ElementState, Event, WindowEvent},
     event_loop::ControlFlow,
     keyboard::{KeyCode, PhysicalKey},
 };
 
-const ENABLE_AUDIO: bool = false;
 const ROM_FILE: &str = "roms/SuperMarioBros.nes";
 
 mod app;
@@ -25,6 +23,9 @@ fn main() {
     let window = Arc::clone(&app.window);
     let mut renderer = Renderer::init(Arc::clone(&window));
 
+    let nes_frame_time = Duration::from_secs_f64(1.0 / 60.0);
+    let mut last_nes_frame = Instant::now();
+
     let res = ev_loop.run(move |ev, loop_target| match ev {
         Event::WindowEvent { event, .. } => {
             renderer.window_event(&event);
@@ -36,6 +37,16 @@ fn main() {
                     handle_keyboard(&app.ctrl_inputs, event)
                 }
                 WindowEvent::RedrawRequested => {
+                    for _ in 0..5 {
+                        if last_nes_frame.elapsed() < nes_frame_time {
+                            break;
+                        };
+                        last_nes_frame += nes_frame_time;
+                        app.run_nes_until_vsync();
+                    }
+
+                    let pixels = app.nesbus.ppu().pixels();
+                    renderer.upload_pixels(pixels);
                     renderer.render();
                     loop_target.set_control_flow(ControlFlow::Poll);
                 }
@@ -44,14 +55,6 @@ fn main() {
         }
         Event::AboutToWait => {
             app.window.request_redraw();
-        }
-        Event::LoopExiting => {
-            app.sound_stream.pause().unwrap();
-            let Some(handle) = app.emu_thread.take() else {
-                unreachable!()
-            };
-            app.running.store(false, Ordering::Relaxed);
-            handle.join().unwrap();
         }
         _ => (),
     });
@@ -81,13 +84,12 @@ fn handle_keyboard(inputs: &[Arc<Mutex<Controller>>; 2], input: winit::event::Ke
     function(&mut inputs[0].lock(), state);
 }
 
-fn translate_color(color: u8) -> [u32; 3] {
-    let index = color as usize * 3;
-    let r = PALETTE[index + 0];
-    let g = PALETTE[index + 1];
-    let b = PALETTE[index + 2];
-
-    [r as u32, g as u32, b as u32]
-}
-
-static PALETTE: &[u8] = include_bytes!("ntscpalette.pal");
+// fn translate_color(color: u8) -> [u32; 3] {
+// let index = color as usize * 3;
+// let r = PALETTE[index + 0];
+// let g = PALETTE[index + 1];
+// let b = PALETTE[index + 2];
+//
+// [r as u32, g as u32, b as u32]
+// }
+//

@@ -1,18 +1,14 @@
-use std::sync::Arc;
-
-use parking_lot::Mutex;
-
 use crate::{
     nesbus::CpuBus,
     util::{get_flag_u16, get_flag_u8, set_flag_u16, set_flag_u8},
 };
 
-const WIDTH: u16 = 341;
-const HEIGHT: u16 = 262;
+use self::pixel_buffer::PixelBuffer;
 
-pub const FRAMEBUFFER_WIDTH: usize = 256;
-pub const FRAMEBUFFER_HEIGHT: usize = 240;
-pub const FRAMEBUFFER_PIXELS: usize = FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT;
+const DOTS: u16 = 341;
+const LINES: u16 = 262;
+
+pub mod pixel_buffer;
 
 pub struct Ppu {
     meta: Meta,
@@ -30,11 +26,10 @@ pub struct Ppu {
     shifters: Shifters,
     sprites: Box<Sprites>,
 
-    staging_buffer: Box<[u8; FRAMEBUFFER_PIXELS]>,
-    framebuffer: Arc<Mutex<[u8; FRAMEBUFFER_PIXELS]>>,
+    pixels: Box<PixelBuffer>,
 }
 impl Ppu {
-    pub fn init(framebuffer: Arc<Mutex<[u8; FRAMEBUFFER_PIXELS]>>) -> Self {
+    pub fn init() -> Self {
         Self {
             meta: Meta::init(),
             control: Control::init(),
@@ -51,8 +46,7 @@ impl Ppu {
             shifters: Shifters::init(),
             sprites: Box::new(Sprites::init()),
 
-            staging_buffer: Box::new([0; FRAMEBUFFER_PIXELS]),
-            framebuffer,
+            pixels: Box::new(PixelBuffer::new()),
         }
     }
 
@@ -97,7 +91,6 @@ impl Ppu {
 
         if self.dot == start {
             self.meta.set_vblank(true);
-            self.update_framebuffer();
         } else if self.dot == end {
             self.meta.set_vblank(false);
             self.meta.set_sprite_zero_hit(false);
@@ -106,22 +99,18 @@ impl Ppu {
 
         cpu.set_nmi(self.meta.vblank() && self.control.nmi_enable());
     }
-    fn update_framebuffer(&mut self) {
-        let mut buffer = self.framebuffer.lock();
-        buffer.clone_from(&self.staging_buffer);
-    }
     fn tick_counter(&mut self) {
         let last = if self.meta.odd_frame() {
-            [WIDTH - 2, HEIGHT - 1]
+            [DOTS - 2, LINES - 1]
         } else {
-            [WIDTH - 1, HEIGHT - 1]
+            [DOTS - 1, LINES - 1]
         };
         if self.dot == last {
             self.dot = [0, 0];
             self.meta.set_odd_frame(!self.meta.odd_frame());
         } else {
             self.dot[0] += 1;
-            if self.dot[0] == WIDTH {
+            if self.dot[0] == DOTS {
                 self.dot[0] = 0;
                 self.dot[1] += 1;
             }
@@ -342,8 +331,7 @@ impl Ppu {
             self.meta.set_sprite_zero_hit(true);
         }
 
-        let i = y * FRAMEBUFFER_WIDTH + x;
-        self.staging_buffer[i] = color;
+        self.pixels.set_color(x, y, color);
     }
     fn generate_sprite_pixel(&self) -> (u8, u8, bool, bool) {
         for sprite in &self.sprites.sprites {
@@ -507,8 +495,14 @@ impl Ppu {
     pub fn dot(&self) -> [u16; 2] {
         self.dot
     }
+    pub fn is_vblank(&self) -> bool {
+        self.meta.vblank()
+    }
     pub fn palette(&self) -> &[u8] {
         &*self.palette
+    }
+    pub fn pixels(&self) -> &PixelBuffer {
+        &self.pixels
     }
 }
 

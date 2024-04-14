@@ -83,13 +83,3 @@ fn handle_keyboard(inputs: &[Arc<Mutex<Controller>>; 2], input: winit::event::Ke
 
     function(&mut inputs[0].lock(), state);
 }
-
-// fn translate_color(color: u8) -> [u32; 3] {
-// let index = color as usize * 3;
-// let r = PALETTE[index + 0];
-// let g = PALETTE[index + 1];
-// let b = PALETTE[index + 2];
-//
-// [r as u32, g as u32, b as u32]
-// }
-//

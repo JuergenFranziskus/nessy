@@ -6,11 +6,11 @@ use cpu_6502::{instruction::decode, Cpu};
 use mapper::MapperBus;
 use nesbus::CpuBus;
 use ppu::{Ppu, PpuBus};
-pub mod apu;
 pub mod input;
 pub mod mapper;
 pub mod nesbus;
 pub mod ppu;
+pub mod apu;
 mod util;
 
 pub fn simple_debug(

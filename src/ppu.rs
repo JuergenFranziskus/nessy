@@ -224,6 +224,8 @@ impl Ppu {
         self.sprites.eval_index += 1;
     }
     fn fetch_sprites(&mut self, bus: &mut PpuBus) {
+        if self.sprites.fetch_index >= 8 { return }; // If rendering is enabled in the middle of a scanline, the counter is not reset
+
         let step = (self.dot[0] - 257) as u8 % 8;
 
         match step {

@@ -1,15 +1,9 @@
-use std::sync::Arc;
 
 use crate::{
-    apu::Apu,
-    input::{Controller, Input},
-    mapper::{Mapper, MapperBus},
-    ppu::{Ppu, PpuBus},
-    util::{get_flag_u8, set_flag_u8},
+    apu::Apu, input::{Controller, Input}, mapper::{Mapper, MapperBus}, ppu::{Ppu, PpuBus}, util::{get_flag_u8, set_flag_u8}
 };
 use cpu_6502::Bus;
 
-use parking_lot::Mutex;
 
 pub struct NesBus<M> {
     cycle: u64,
@@ -24,7 +18,7 @@ pub struct NesBus<M> {
     vram: Box<[u8; 2048]>,
 }
 impl<M> NesBus<M> {
-    pub fn new(mapper: M, controller_inputs: [Arc<Mutex<Controller>>; 2]) -> Self {
+    pub fn new(mapper: M) -> Self {
         Self {
             cycle: 0,
             cpu_bus: CpuBus::init(),
@@ -33,7 +27,7 @@ impl<M> NesBus<M> {
             apu: Apu::init(),
             ppu: Ppu::init(),
             mapper,
-            input: Input::init(controller_inputs),
+            input: Input::init(),
             ram: Box::new([0; 2048]),
             vram: Box::new([0; 2048]),
         }
@@ -41,9 +35,6 @@ impl<M> NesBus<M> {
 
     pub fn ppu(&self) -> &Ppu {
         &self.ppu
-    }
-    pub fn apu(&self) -> &Apu {
-        &self.apu
     }
     pub fn input_mut(&mut self) -> &mut Input {
         &mut self.input
@@ -53,6 +44,9 @@ impl<M> NesBus<M> {
     }
     pub fn cycles(&self) -> u64 {
         self.cycle
+    }
+    pub fn controllers_mut(&mut self) -> &mut [Controller; 2] {
+        self.input.controllers_mut()
     }
 }
 impl<M> NesBus<M>

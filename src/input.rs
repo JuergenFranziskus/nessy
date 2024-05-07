@@ -1,6 +1,3 @@
-use parking_lot::Mutex;
-use std::sync::Arc;
-
 use crate::{nesbus::CpuBus, util::set_flag_u8};
 
 pub struct Input {
@@ -8,28 +5,19 @@ pub struct Input {
     indices: [u8; 2],
     strobe: bool,
 
-    controller_inputs: [Arc<Mutex<Controller>>; 2],
 }
 impl Input {
-    pub fn init(controller_inputs: [Arc<Mutex<Controller>>; 2]) -> Self {
+    pub fn init() -> Self {
         Self {
             controllers: [Controller(0); 2],
             indices: [0; 2],
             strobe: false,
-
-            controller_inputs,
         }
     }
 
     pub fn cycle(&mut self, cpu: &mut CpuBus) {
-        self.update_controllers();
         self.strobe();
         self.handle_cpu(cpu);
-    }
-    fn update_controllers(&mut self) {
-        for (ctrl, input) in self.controllers.iter_mut().zip(&self.controller_inputs) {
-            *ctrl = *input.lock();
-        }
     }
     fn strobe(&mut self) {
         if self.strobe {
@@ -60,6 +48,9 @@ impl Input {
         }
     }
 
+    pub fn controllers_mut(&mut self) -> &mut [Controller; 2] {
+        &mut self.controllers
+    }
     pub fn controller_mut(&mut self, controller: u8) -> &mut Controller {
         &mut self.controllers[controller as usize]
     }

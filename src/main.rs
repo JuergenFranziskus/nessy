@@ -1,6 +1,5 @@
 use app::App;
 use nessy::input::Controller;
-use parking_lot::Mutex;
 use renderer::Renderer;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +33,7 @@ fn main() {
                     loop_target.exit();
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
-                    handle_keyboard(&app.ctrl_inputs, event)
+                    handle_keyboard(app.nesbus.controllers_mut(), event)
                 }
                 WindowEvent::RedrawRequested => {
                     for _ in 0..5 {
@@ -62,7 +61,7 @@ fn main() {
     res.unwrap();
 }
 
-fn handle_keyboard(inputs: &[Arc<Mutex<Controller>>; 2], input: winit::event::KeyEvent) {
+fn handle_keyboard(inputs: &mut [Controller; 2], input: winit::event::KeyEvent) {
     let keycode = input.physical_key;
     let function = match keycode {
         PhysicalKey::Code(KeyCode::KeyI) => Controller::set_up,
@@ -81,5 +80,5 @@ fn handle_keyboard(inputs: &[Arc<Mutex<Controller>>; 2], input: winit::event::Ke
         ElementState::Released => false,
     };
 
-    function(&mut inputs[0].lock(), state);
+    function(&mut inputs[0], state);
 }

@@ -1,6 +1,4 @@
 use crate::nesbus::CpuBus;
-use parking_lot::Mutex;
-use std::sync::Arc;
 
 const SAMPLES_PER_SECOND: usize = 44100;
 const CYCLES_PER_SAMPLE: usize = 1_789773 / SAMPLES_PER_SECOND;
@@ -11,8 +9,7 @@ pub struct Apu {
     dma: Dma,
     frame_counter: FrameCounter,
 
-    samples: Arc<Mutex<Vec<f32>>>,
-    cycles_until_sample: usize,
+    cycles_since_sample: usize,
 }
 impl Apu {
     pub fn init() -> Self {
@@ -22,9 +19,7 @@ impl Apu {
             dma: Dma::init(),
             frame_counter: FrameCounter::init(),
 
-            // Preallocate enough for one second's worth of samples just cuz
-            samples: Arc::new(Mutex::new(Vec::with_capacity(SAMPLES_PER_SECOND))),
-            cycles_until_sample: CYCLES_PER_SAMPLE,
+            cycles_since_sample: 0,
         }
     }
 
@@ -48,11 +43,11 @@ impl Apu {
     }
 
     fn tick_frame_counter(&mut self) {
-        if self.frame_counter.cycles_until_step != 0 {
-            self.frame_counter.cycles_until_step -= 1;
+        if self.frame_counter.cycles_until_step < FrameCounter::CYCLES_PER_STEP {
+            self.frame_counter.cycles_until_step += 1;
             return;
         }
-        self.frame_counter.cycles_until_step = FrameCounter::CYCLES_PER_STEP;
+        self.frame_counter.cycles_until_step = 0;
 
         if self.frame_counter.mode {
             // Five step sequence
@@ -71,7 +66,7 @@ impl Apu {
                 5.. => unreachable!(),
             }
             self.frame_counter.step += 1;
-            if self.frame_counter.step == 5 {
+            if self.frame_counter.step >= 5 {
                 self.frame_counter.step = 0;
             }
         } else {
@@ -91,7 +86,7 @@ impl Apu {
                 4.. => unreachable!(),
             }
             self.frame_counter.step += 1;
-            if self.frame_counter.step == 4 {
+            if self.frame_counter.step >= 4 {
                 self.frame_counter.step = 0;
             }
         }
@@ -100,22 +95,15 @@ impl Apu {
     fn tick_envelopes(&mut self) {}
 
     fn produce_sample(&mut self) {
-        if self.cycles_until_sample != 0 {
-            self.cycles_until_sample -= 1;
+        if self.cycles_since_sample < CYCLES_PER_SAMPLE {
+            self.cycles_since_sample += 1;
             return;
         }
-        self.cycles_until_sample = CYCLES_PER_SAMPLE;
+        self.cycles_since_sample = 0;
 
         let sample = self.mix();
-
-        let mut buffer = self.samples.lock();
-
-        if buffer.len() == SAMPLES_PER_SECOND {
-            // We don't want the buffer growing when audio isn't being played for some reason.
-            buffer.clear();
-        }
-
-        buffer.push(sample);
+        // This is where I'd put my audio output..
+        // If I HAD ANY!!!
     }
     fn mix(&mut self) -> f32 {
         let pulse_0 = 0.0;
@@ -159,11 +147,11 @@ impl Apu {
         self.update_dmc_dma();
     }
     fn update_dmc_output(&mut self) {
-        if self.dmc.cycles_until_next != 0 {
-            self.dmc.cycles_until_next -= 1;
+        if self.dmc.cycles_since_last < self.dmc.wait_cycles {
+            self.dmc.cycles_since_last += 1;
             return;
         }
-        self.dmc.cycles_until_next = self.dmc.wait_cycles;
+        self.dmc.cycles_since_last = 0;
 
         if self.dmc.bits_remaining == 0 {
             if let Some(sample) = self.dmc.sample_buffer.take() {
@@ -283,7 +271,7 @@ impl Apu {
                 self.frame_counter.mode = cpu.data() & 128 != 0;
                 self.frame_counter.irq_disable = cpu.data() & 64 != 0;
                 self.frame_counter.step = 0;
-                self.frame_counter.cycles_until_step = FrameCounter::CYCLES_PER_STEP;
+                self.frame_counter.cycles_until_step = 0;
             }
             _ => (),
         }
@@ -291,10 +279,6 @@ impl Apu {
     fn assert_irqs(&self, cpu: &mut CpuBus) {
         let irq = self.status.dmc_irq || self.status.frame_irq;
         cpu.or_irq(irq);
-    }
-
-    pub fn samples(&self) -> &Arc<Mutex<Vec<f32>>> {
-        &self.samples
     }
 }
 
@@ -309,7 +293,7 @@ struct Dmc {
     irq_enable: bool,
     loop_playback: bool,
     wait_cycles: u16,
-    cycles_until_next: u16,
+    cycles_since_last: u16,
 
     sample: u8,
     start: u16,
@@ -329,7 +313,7 @@ impl Dmc {
             irq_enable: false,
             loop_playback: false,
             wait_cycles: 54,
-            cycles_until_next: 0,
+            cycles_since_last: 0,
 
             sample: 0,
             start: 0,
@@ -379,7 +363,7 @@ impl FrameCounter {
             mode: false,
             irq_disable: true,
             step: 0,
-            cycles_until_step: Self::CYCLES_PER_STEP,
+            cycles_until_step: 0,
         }
     }
 

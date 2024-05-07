@@ -1,4 +1,4 @@
-use self::{mapper0::Mapper0, mapper2::Mapper2};
+use self::mapper0::Mapper0;
 use crate::{
     nesbus::CpuBus,
     ppu::PpuBus,
@@ -7,7 +7,6 @@ use crate::{
 use nes_rom_parser::Rom;
 
 pub mod mapper0;
-pub mod mapper2;
 
 pub trait Mapper {
     fn cycle(&mut self, bus: &mut MapperBus, cpu: &mut CpuBus, ppu: &mut PpuBus);
@@ -74,7 +73,6 @@ pub fn get_mapper(rom: &Rom) -> DynMapper {
     let mapper = rom.header.mapper;
     match rom.header.mapper {
         0 => DynMapper::new(Mapper0::new(rom)),
-        2 => DynMapper::new(Mapper2::new(rom)),
         _ => unimplemented!("Mapper {mapper} is not implemented"),
     }
 }

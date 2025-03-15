@@ -9,3 +9,5 @@ edition = "2024"
 
 [dependencies]
 m6502 = { path = "m6502" }
+minifb = "0.28.0"
+

@@ -1,6 +1,11 @@
+[workspace]
+members = ["m6502"]
+
+
 [package]
 name = "nessy"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+m6502 = { path = "m6502" }

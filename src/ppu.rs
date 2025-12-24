@@ -248,18 +248,18 @@ impl Ppu {
             LAST_EVEN_DOT
         };
 
+        if self.dot == SET_VBLANK {
+            self.vblank = true;
+        } else if self.dot == CLEAR_VBLANK {
+            self.vblank = false;
+            self.sprite_0_hit = false;
+            self.sprite_overflow = false;
+        }
+
         if self.dot == last_dot {
             self.dot = 0;
             self.odd_frame = !self.odd_frame;
         } else {
-            if self.dot == SET_VBLANK {
-                self.vblank = true;
-            } else if self.dot == CLEAR_VBLANK {
-                self.vblank = false;
-                self.sprite_0_hit = false;
-                self.sprite_overflow = false;
-            }
-
             self.dot += 1;
         }
     }

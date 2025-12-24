@@ -1,13 +1,24 @@
-use m6502::{core::Core, Bus};
-use minifb::{Window, WindowOptions};
-use nessy::{mapper::mapper0::Mapper0, nes::Nes, rom::Rom};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use m6502::core::Core;
+use nessy::{apu::Bus, mapper::mapper0::Mapper0, nes::Nes, rom::Rom};
+use spin_sleep::{sleep, sleep_until};
+use winit::{
+    application::ApplicationHandler,
+    dpi::PhysicalSize,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, EventLoop},
+    window::{Window, WindowAttributes},
+};
+
+use crate::render::Render;
+
+mod render;
 
 fn main() {
-    run();
-}
-
-#[allow(dead_code)]
-fn run() {
     let rom = std::fs::read("roms/DonkeyKong.nes").unwrap();
     let rom = Rom::parse(rom).unwrap();
 
@@ -16,35 +27,125 @@ fn run() {
     assert_eq!(rom.header.submapper, 0);
 
     let mapper = Mapper0::new(rom);
-    let mut nes = Nes::new(Box::new(mapper));
-    let mut framebuffer = [0; 256 * 240];
+    let nes = Nes::new(Box::new(mapper));
 
-    let opt = WindowOptions {
-        resize: true,
-        ..Default::default()
-    };
-    let mut window = Window::new("NES WOW", 640, 480, opt).unwrap();
-    window.set_target_fps(60);
+    let ev_loop = EventLoop::new().unwrap();
+    let mut app = App::new(nes);
 
-    while window.is_open() {
-        run_until_not_nmi(&mut nes, &mut framebuffer);
-        run_until_nmi(&mut nes, &mut framebuffer);
-        window.update_with_buffer(&framebuffer, 256, 240).unwrap();
+    ev_loop.run_app(&mut app).unwrap();
+}
+
+const FRAME_TIME: Duration = Duration::new(0, 1_000_000_000 / 144);
+const NES_FRAME_TIME: Duration = Duration::new(0, 1_000_000_000 / 60);
+
+struct App {
+    init: Option<Init>,
+    last_frame: Instant,
+    last_nes_frame: Instant,
+
+    nes: Nes,
+    framebuffer: [u32; 256 * 240],
+}
+impl App {
+    fn new(nes: Nes) -> Self {
+        Self {
+            init: None,
+            last_frame: Instant::now(),
+            last_nes_frame: Instant::now(),
+
+            nes,
+            framebuffer: [u32::MAX; _],
+        }
+    }
+
+    fn update_render(&mut self) {
+        self.update();
+        self.render();
+    }
+    fn update(&mut self) {
+        while self.last_nes_frame.elapsed() >= NES_FRAME_TIME {
+            self.last_nes_frame += NES_FRAME_TIME;
+            run_for_frame(&mut self.nes, &mut self.framebuffer);
+        }
+    }
+    fn render(&mut self) {
+        if let Some(init) = &mut self.init {
+            init.render.render(&self.framebuffer);
+            init.window.request_redraw();
+        }
+
+        let took = self.last_frame.elapsed();
+        if took < FRAME_TIME {
+            let sleep_for = FRAME_TIME - took;
+            sleep(sleep_for);
+        }
+        self.last_frame = Instant::now();
+    }
+}
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if self.init.is_none() {
+            self.init = Some(Init::new(event_loop));
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => self
+                .init
+                .iter_mut()
+                .for_each(|i| i.resize(size.width, size.height)),
+            WindowEvent::RedrawRequested => self.update_render(),
+            _ => (),
+        }
     }
 }
 
-fn run_until_nmi(nes: &mut Nes, framebuffer: &mut [u32; 256 * 240]) {
+struct Init {
+    window: Arc<Window>,
+    render: Render,
+}
+impl Init {
+    fn new(ev_loop: &ActiveEventLoop) -> Self {
+        let attributes = WindowAttributes::default()
+            .with_title("Nessy")
+            .with_inner_size(PhysicalSize::new(1024, 720));
+        let window = ev_loop.create_window(attributes).unwrap();
+        let window = Arc::new(window);
+
+        let render = Render::new(Arc::clone(&window));
+
+        Self { window, render }
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.render.resize(width, height);
+    }
+}
+
+fn run_for_frame(nes: &mut Nes, framebuffer: &mut [u32]) {
+    run_until_not_nmi(nes, framebuffer);
+    run_until_nmi(nes, framebuffer);
+}
+
+fn run_until_nmi(nes: &mut Nes, framebuffer: &mut [u32]) {
     while !nes.ppu.is_vblank() {
         clock(nes, framebuffer);
     }
 }
-fn run_until_not_nmi(nes: &mut Nes, framebuffer: &mut [u32; 256 * 240]) {
+fn run_until_not_nmi(nes: &mut Nes, framebuffer: &mut [u32]) {
     while nes.ppu.is_vblank() {
         clock(nes, framebuffer);
     }
 }
 
-fn clock(nes: &mut Nes, framebuffer: &mut [u32; 256 * 240]) {
+fn clock(nes: &mut Nes, framebuffer: &mut [u32]) {
     let pixels = nes.clock();
     //print_debug(nes.cpu.cpu().core(), nes.cpu_bus);
 
@@ -55,7 +156,7 @@ fn clock(nes: &mut Nes, framebuffer: &mut [u32; 256 * 240]) {
         let r = PALETTE[p + 0] as u32;
         let g = PALETTE[p + 1] as u32;
         let b = PALETTE[p + 2] as u32;
-        let rgba = (r << 16) | (g << 8) | (b << 0);
+        let rgba = (0xFF << 24) | (b << 16) | (g << 8) | (r << 0);
 
         if i < framebuffer.len() {
             framebuffer[i] = rgba;

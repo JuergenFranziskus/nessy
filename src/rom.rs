@@ -314,11 +314,26 @@ impl Display for RomErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::HeaderIncomplete => write!(f, "the rom is too small to fit the full INES header"),
-            Self::WrongMagicNumber => write!(f, "the rom does not start with the INes magic number 'NES', 0x1A"),
-            Self::WrongINesConsoleType => write!(f, "the rom, interpreted as legacy INes, specifies an invalid console type"),
-            Self::TrainerIncomplete => write!(f, "the rom is smaller than specified by the header, starting within the trainer"),
-            Self::PrgRomIncomplete => write!(f, "the rom is smaller than specified by the header, starting within the program rom"),
-            Self::ChrRomIncomplete => write!(f, "the rom is smaller than specified by the header, starting within the character rom"),
+            Self::WrongMagicNumber => write!(
+                f,
+                "the rom does not start with the INes magic number 'NES', 0x1A"
+            ),
+            Self::WrongINesConsoleType => write!(
+                f,
+                "the rom, interpreted as legacy INes, specifies an invalid console type"
+            ),
+            Self::TrainerIncomplete => write!(
+                f,
+                "the rom is smaller than specified by the header, starting within the trainer"
+            ),
+            Self::PrgRomIncomplete => write!(
+                f,
+                "the rom is smaller than specified by the header, starting within the program rom"
+            ),
+            Self::ChrRomIncomplete => write!(
+                f,
+                "the rom is smaller than specified by the header, starting within the character rom"
+            ),
         }
     }
 }

@@ -5,7 +5,7 @@ use std::{
 
 use m6502::core::Core;
 use nessy::{apu::Bus, mapper::mapper0::Mapper0, nes::Nes, rom::Rom};
-use spin_sleep::{sleep, sleep_until};
+use spin_sleep::sleep;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -43,6 +43,7 @@ struct App {
     last_frame: Instant,
     last_nes_frame: Instant,
 
+    print: bool,
     nes: Nes,
     framebuffer: [u32; 256 * 240],
 }
@@ -53,6 +54,7 @@ impl App {
             last_frame: Instant::now(),
             last_nes_frame: Instant::now(),
 
+            print: false,
             nes,
             framebuffer: [u32::MAX; _],
         }
@@ -65,7 +67,7 @@ impl App {
     fn update(&mut self) {
         while self.last_nes_frame.elapsed() >= NES_FRAME_TIME {
             self.last_nes_frame += NES_FRAME_TIME;
-            run_for_frame(&mut self.nes, &mut self.framebuffer);
+            run_for_frame(&mut self.nes, &mut self.framebuffer, &mut self.print);
         }
     }
     fn render(&mut self) {
@@ -129,25 +131,28 @@ impl Init {
     }
 }
 
-fn run_for_frame(nes: &mut Nes, framebuffer: &mut [u32]) {
-    run_until_not_nmi(nes, framebuffer);
-    run_until_nmi(nes, framebuffer);
+fn run_for_frame(nes: &mut Nes, framebuffer: &mut [u32], print: &mut bool) {
+    run_until_not_nmi(nes, framebuffer, print);
+    run_until_nmi(nes, framebuffer, print);
 }
 
-fn run_until_nmi(nes: &mut Nes, framebuffer: &mut [u32]) {
+fn run_until_nmi(nes: &mut Nes, framebuffer: &mut [u32], print: &mut bool) {
     while !nes.ppu.is_vblank() {
-        clock(nes, framebuffer);
+        clock(nes, framebuffer, print);
     }
 }
-fn run_until_not_nmi(nes: &mut Nes, framebuffer: &mut [u32]) {
+fn run_until_not_nmi(nes: &mut Nes, framebuffer: &mut [u32], print: &mut bool) {
     while nes.ppu.is_vblank() {
-        clock(nes, framebuffer);
+        clock(nes, framebuffer, print);
     }
 }
 
-fn clock(nes: &mut Nes, framebuffer: &mut [u32]) {
+fn clock(nes: &mut Nes, framebuffer: &mut [u32], print: &mut bool) {
     let pixels = nes.clock();
-    //print_debug(nes.cpu.cpu().core(), nes.cpu_bus);
+
+    if *print {
+        print_debug(nes.cpu.cpu().core(), nes.cpu_bus);
+    }
 
     for (p, x, y) in pixels {
         let i = y * 256 + x;

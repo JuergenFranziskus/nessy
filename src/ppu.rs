@@ -88,6 +88,9 @@ pub struct Ppu {
 
     shifters: Shifters,
 
+    sprites: [Sprite; 8],
+    sprite: usize,
+
     pixel: u8,
     pixel_coord: [u32; 2],
 }
@@ -110,14 +113,17 @@ impl Ppu {
             w: false,
             x: 0,
 
-            oam: [0; 256],
-            palette: [0; 32],
+            oam: [0; _],
+            palette: [0; _],
             mem: Mem::Idle,
 
             shifters: Shifters::new(),
 
+            sprites: [Sprite::new(); _],
+            sprite: 0,
+
             pixel: 0,
-            pixel_coord: [0; 2],
+            pixel_coord: [0; _],
         }
     }
 
@@ -287,26 +293,32 @@ impl Ppu {
             0 => (),
             1..257 => {
                 let step = x - 1;
-                self.fetch_background(step, bus);
+                self.fetch_tiles(step, y, false, bus);
                 if !prerender {
                     self.produce_pixel(x - 1, y);
                     self.shifters.shift_next_pixel();
                 }
             }
             257 => {
+                self.latch_hi_pattern(false, bus);
+                self.eval_sprites(y, prerender);
                 self.v = inc_vert(self.v);
                 self.v = copy_hori(self.v, self.t);
+                self.fetch_tiles(0, y, true, bus);
             }
-            258..280 => (),
-            280..305 => {
+            258..321 => {
+                let step = x - 257;
+                self.fetch_tiles(step, y, true, bus);
+            }
+            321 => {
+                self.latch_hi_pattern(true, bus);
                 if prerender {
                     self.v = copy_vert(self.v, self.t);
                 }
             }
-            305..321 => (),
-            321..337 => self.fetch_background(x - 321, bus),
+            321..337 => self.fetch_tiles(x - 321, y, false, bus),
             337 => {
-                self.latch_hi_pattern(bus);
+                self.latch_hi_pattern(false, bus);
                 self.fetch_name();
             }
             338 => (),
@@ -315,11 +327,11 @@ impl Ppu {
             DOTS_PER_LINE.. => unreachable!(),
         }
     }
-    fn fetch_background(&mut self, step: u32, bus: &mut Bus) {
+    fn fetch_tiles(&mut self, step: u32, y: u32, sprite: bool, bus: &mut Bus) {
         match step % 8 {
             0 => {
                 if step != 0 {
-                    self.latch_hi_pattern(bus);
+                    self.latch_hi_pattern(sprite, bus);
                 }
 
                 self.fetch_name();
@@ -332,22 +344,34 @@ impl Ppu {
             3 => (),
             4 => {
                 self.shifters.next_palette = bus.data;
-                self.fetch_pattern_lo();
+                self.fetch_pattern_lo(y, sprite);
             }
             5 => (),
             6 => {
-                self.shifters.next_pattern[0] = bus.data;
-                self.fetch_pattern_hi();
+                self.latch_lo_pattern(sprite, bus);
+                self.fetch_pattern_hi(y, sprite);
             }
             7 => (),
             8.. => unreachable!(),
         }
     }
-    fn latch_hi_pattern(&mut self, bus: &mut Bus) {
-        self.shifters.next_pattern[1] = bus.data;
-        self.shifters
-            .shift_next_tile(coarse_x(self.v), coarse_y(self.v));
-        self.v = inc_hori(self.v);
+    fn latch_hi_pattern(&mut self, sprite: bool, bus: &mut Bus) {
+        if sprite {
+            self.sprites[self.sprite].pattern[1] = bus.data;
+            self.sprite += 1;
+        } else {
+            self.shifters.next_pattern[1] = bus.data;
+            self.shifters
+                .shift_next_tile(coarse_x(self.v), coarse_y(self.v));
+            self.v = inc_hori(self.v);
+        }
+    }
+    fn latch_lo_pattern(&mut self, sprite: bool, bus: &mut Bus) {
+        if sprite {
+            self.sprites[self.sprite].pattern[0] = bus.data;
+        } else {
+            self.shifters.next_pattern[0] = bus.data;
+        }
     }
     fn fetch_name(&mut self) {
         self.read(name_addr(self.v))
@@ -355,27 +379,50 @@ impl Ppu {
     fn fetch_attr(&mut self) {
         self.read(attr_addr(self.v));
     }
-    fn fetch_pattern_lo(&mut self) {
-        self.read(self.pattern_addr());
+    fn fetch_pattern_lo(&mut self, y: u32, sprite: bool) {
+        self.read(self.pattern_addr(y, sprite));
     }
-    fn fetch_pattern_hi(&mut self) {
-        self.read(self.pattern_addr() + 8);
+    fn fetch_pattern_hi(&mut self, y: u32, sprite: bool) {
+        self.read(self.pattern_addr(y, sprite) + 8);
     }
-    fn pattern_addr(&self) -> u16 {
-        let name = self.shifters.name;
+    fn pattern_addr(&self, y: u32, sprite: bool) -> u16 {
+        let name = if sprite {
+            self.sprites[self.sprite].fetch_name()
+        } else {
+            self.shifters.name
+        };
         let base = name as u16 * 16;
-        let fine_y = fine_y(self.v) as u16;
-        let h = if self.ctrl.b() { 0x1000 } else { 0 };
+        let fine_y = if sprite {
+            self.sprites[self.sprite].fine_y(y) as u16
+        } else {
+            fine_y(self.v) as u16
+        };
+        let table_select = if sprite { self.ctrl.s() } else { self.ctrl.b() };
+        let h = if table_select { 0x1000 } else { 0 };
         base | fine_y | h
     }
 
     fn produce_pixel(&mut self, x: u32, y: u32) {
-        let (bg, _bg_transpi) = self.produce_background();
+        let (bg, bg_transpi) = self.produce_background();
+        let sp = self.produce_sprite(x, y);
 
-        let pixel = bg;
-        self.pixel = pixel;
+        if let Some((sp, sp_transpi, sp_0, sp_priority)) = sp {
+            self.pixel = match (bg_transpi, sp_transpi, sp_priority) {
+                (true, true, _) => bg,
+                (false, true, _) => bg,
+                (true, false, _) => sp,
+                (false, false, false) => bg,
+                (false, false, true) => sp,
+            };
+
+            if !bg_transpi && !sp_transpi && sp_0 {
+                self.sprite_0_hit = true;
+            }
+        } else {
+            self.pixel = bg;
+        }
+
         self.pixel_coord = [x, y];
-        //println!("{x} {y}: {pixel}");
     }
     fn produce_background(&self) -> (u8, bool) {
         let fine_x = self.x;
@@ -397,6 +444,38 @@ impl Ppu {
             (color, false)
         }
     }
+    fn produce_sprite(&self, x: u32, _y: u32) -> Option<(u8, bool, bool, bool)> {
+        for (i, sprite) in self.sprites.iter().enumerate() {
+            if !sprite.valid {
+                break;
+            }
+            let sp_x = sprite.x as u32;
+            if !(sp_x..=sp_x + 7).contains(&x) {
+                continue;
+            }
+
+            let fine_x = sprite.fine_x(x);
+            let pattern_lo = sprite.pattern[0] >> fine_x & 1 != 0;
+            let pattern_hi = sprite.pattern[1] >> fine_x & 1 != 0;
+            let pattern = if pattern_lo { 1 } else { 0 } | if pattern_hi { 2 } else { 0 };
+
+            if pattern == 0 {
+                return Some((self.palette[0], true, false, false));
+            } else {
+                let palette = sprite.palette + 4;
+                let color_idx = pattern | palette << 2;
+                let color_idx = mirror_palette_offset(color_idx);
+                let color = self.palette[color_idx as usize];
+
+                let sp_0 = i == 0;
+                let priority = sprite.priority;
+
+                return Some((color, false, sp_0, priority));
+            }
+        }
+
+        None
+    }
 
     fn increment_v(&mut self) {
         let by = if self.ctrl.i() { 32 } else { 1 };
@@ -411,6 +490,43 @@ impl Ppu {
     }
     fn write(&mut self, addr: u16, data: u8) {
         self.mem = Mem::Write(addr, data);
+    }
+
+    fn eval_sprites(&mut self, y: u32, prerender: bool) {
+        let y = y as u8;
+        self.sprite = 0;
+        for sprite in &mut self.sprites {
+            sprite.valid = false;
+        }
+
+        if prerender {
+            return;
+        };
+
+        if !self.mask.enable_sp() {
+            return;
+        };
+
+        for i in 0..64 {
+            let i = i * 4;
+            if self.sprite >= 8 {
+                break;
+            }
+            let sp_y = self.oam[i + 0];
+            let name = self.oam[i + 1];
+            let attr = self.oam[i + 2];
+            let x = self.oam[i + 3];
+
+            let min = sp_y;
+            let max = sp_y + 7;
+            if !(min..=max).contains(&y) {
+                continue;
+            }
+            self.sprites[self.sprite].load(x, sp_y, name, attr);
+            self.sprite += 1;
+        }
+
+        self.sprite = 0;
     }
 }
 
@@ -615,5 +731,61 @@ impl Shifters {
             *p >>= 1;
             *p |= if c { 128 } else { 0 };
         }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Sprite {
+    valid: bool,
+    x: u8,
+    y: u8,
+    name: u8,
+    palette: u8,
+    priority: bool,
+    flip_x: bool,
+    flip_y: bool,
+    pattern: [u8; 2],
+}
+impl Sprite {
+    fn new() -> Self {
+        Self {
+            valid: false,
+            x: 0,
+            y: 0,
+            name: 0,
+            palette: 0,
+            priority: false,
+            flip_x: false,
+            flip_y: false,
+            pattern: [0; _],
+        }
+    }
+
+    fn load(&mut self, x: u8, y: u8, name: u8, attr: u8) {
+        self.x = x;
+        self.y = y;
+        self.name = name;
+        self.palette = attr & 0x3;
+        self.priority = attr & 0x20 != 0;
+        self.flip_x = attr & 0x40 != 0;
+        self.flip_y = attr & 0x80 != 0;
+        self.valid = true;
+    }
+
+    fn fine_y(&self, line: u32) -> u32 {
+        let y = self.y as u32;
+        if self.flip_y {
+            7 - (line - y)
+        } else {
+            line - y
+        }
+    }
+    fn fine_x(&self, dot: u32) -> u32 {
+        let x = self.x as u32;
+        if !self.flip_x { 7 - (dot - x) } else { dot - x }
+    }
+
+    fn fetch_name(&self) -> u8 {
+        if self.valid { self.name } else { 0xFF }
     }
 }

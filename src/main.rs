@@ -9,8 +9,9 @@ use spin_sleep::sleep;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::WindowEvent,
+    event::{KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowAttributes},
 };
 
@@ -19,7 +20,7 @@ use crate::render::Render;
 mod render;
 
 fn main() {
-    let rom = std::fs::read("roms/DonkeyKong.nes").unwrap();
+    let rom = std::fs::read("roms/SuperMarioBros.nes").unwrap();
     let rom = Rom::parse(rom).unwrap();
 
     println!("{:#?}", rom.header);
@@ -46,6 +47,15 @@ struct App {
     print: bool,
     nes: Nes,
     framebuffer: [u32; 256 * 240],
+
+    a: bool,
+    b: bool,
+    select: bool,
+    start: bool,
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
 }
 impl App {
     fn new(nes: Nes) -> Self {
@@ -57,14 +67,47 @@ impl App {
             print: false,
             nes,
             framebuffer: [u32::MAX; _],
+
+            a: false,
+            b: false,
+            select: false,
+            start: false,
+            up: false,
+            down: false,
+            left: false,
+            right: false,
         }
     }
 
+    fn handle_keyboard(&mut self, event: KeyEvent) {
+        let state = event.state.is_pressed();
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::KeyW) => self.up = state,
+            PhysicalKey::Code(KeyCode::KeyA) => self.left = state,
+            PhysicalKey::Code(KeyCode::KeyS) => self.down = state,
+            PhysicalKey::Code(KeyCode::KeyD) => self.right = state,
+            PhysicalKey::Code(KeyCode::KeyJ) => self.b = state,
+            PhysicalKey::Code(KeyCode::KeyK) => self.a = state,
+            PhysicalKey::Code(KeyCode::Semicolon) => self.select = state,
+            PhysicalKey::Code(KeyCode::Enter) => self.start = state,
+            _ => (),
+        }
+    }
     fn update_render(&mut self) {
         self.update();
         self.render();
     }
     fn update(&mut self) {
+        let controller = &mut self.nes.cpu.controllers()[0];
+        controller.set_a(self.a);
+        controller.set_b(self.b);
+        controller.set_select(self.select);
+        controller.set_start(self.start);
+        controller.set_up(self.up);
+        controller.set_down(self.down);
+        controller.set_left(self.left);
+        controller.set_right(self.right);
+
         while self.last_nes_frame.elapsed() >= NES_FRAME_TIME {
             self.last_nes_frame += NES_FRAME_TIME;
             run_for_frame(&mut self.nes, &mut self.framebuffer, &mut self.print);
@@ -104,6 +147,11 @@ impl ApplicationHandler for App {
                 .iter_mut()
                 .for_each(|i| i.resize(size.width, size.height)),
             WindowEvent::RedrawRequested => self.update_render(),
+            WindowEvent::KeyboardInput {
+                device_id: _,
+                event,
+                is_synthetic: _,
+            } => self.handle_keyboard(event),
             _ => (),
         }
     }

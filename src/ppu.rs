@@ -315,9 +315,15 @@ impl Ppu {
                 if prerender {
                     self.v = copy_vert(self.v, self.t);
                 }
+                self.shifters.shift_next_pixel();
+                self.fetch_tiles(x - 321, y, false, bus);
             }
-            321..337 => self.fetch_tiles(x - 321, y, false, bus),
+            322..337 => {
+                self.shifters.shift_next_pixel();
+                self.fetch_tiles(x - 321, y, false, bus);
+            }
             337 => {
+                self.shifters.shift_next_pixel();
                 self.latch_hi_pattern(false, bus);
                 self.fetch_name();
             }
@@ -403,7 +409,7 @@ impl Ppu {
     }
 
     fn produce_pixel(&mut self, x: u32, y: u32) {
-        let (bg, bg_transpi) = self.produce_background();
+        let (bg, bg_transpi) = self.produce_background(x);
         let sp = self.produce_sprite(x, y);
 
         if let Some((sp, sp_transpi, sp_0, sp_priority)) = sp {
@@ -424,13 +430,13 @@ impl Ppu {
 
         self.pixel_coord = [x, y];
     }
-    fn produce_background(&self) -> (u8, bool) {
+    fn produce_background(&self, x: u32) -> (u8, bool) {
         let fine_x = self.x;
         let pattern_lo = self.shifters.pattern[0] >> fine_x & 1 != 0;
         let pattern_hi = self.shifters.pattern[1] >> fine_x & 1 != 0;
         let pattern = if pattern_lo { 1 } else { 0 } | if pattern_hi { 2 } else { 0 };
 
-        if !pattern_lo && !pattern_hi {
+        if pattern == 0 || (!self.mask.left_bg() && x < 8) {
             (self.palette[0], true)
         } else {
             let palette_lo = self.shifters.palette[0] >> fine_x & 1 != 0;
@@ -445,7 +451,11 @@ impl Ppu {
         }
     }
     fn produce_sprite(&self, x: u32, _y: u32) -> Option<(u8, bool, bool, bool)> {
-        for (i, sprite) in self.sprites.iter().enumerate() {
+        if !self.mask.left_sp() && x < 8 {
+            return None;
+        }
+
+        for sprite in &self.sprites {
             if !sprite.valid {
                 break;
             }
@@ -460,17 +470,17 @@ impl Ppu {
             let pattern = if pattern_lo { 1 } else { 0 } | if pattern_hi { 2 } else { 0 };
 
             if pattern == 0 {
-                return Some((self.palette[0], true, false, false));
+                continue;
             } else {
                 let palette = sprite.palette + 4;
                 let color_idx = pattern | palette << 2;
                 let color_idx = mirror_palette_offset(color_idx);
                 let color = self.palette[color_idx as usize];
 
-                let sp_0 = i == 0;
+                let sp_0 = sprite.sp_0;
                 let priority = sprite.priority;
 
-                return Some((color, false, sp_0, priority));
+                return Some((color, false, sp_0, !priority));
             }
         }
 
@@ -523,6 +533,7 @@ impl Ppu {
                 continue;
             }
             self.sprites[self.sprite].load(x, sp_y, name, attr);
+            self.sprites[self.sprite].sp_0 = i == 0;
             self.sprite += 1;
         }
 
@@ -737,6 +748,7 @@ impl Shifters {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Sprite {
     valid: bool,
+    sp_0: bool,
     x: u8,
     y: u8,
     name: u8,
@@ -750,6 +762,7 @@ impl Sprite {
     fn new() -> Self {
         Self {
             valid: false,
+            sp_0: false,
             x: 0,
             y: 0,
             name: 0,
